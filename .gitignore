@@ -1,8 +1,7 @@
 # Environment variables - DO NOT COMMIT
 .env
 
-# Configuration files that might contain secrets
-config.yaml
+
 
 # Compiled executable
 LockIn-Bot.exe
