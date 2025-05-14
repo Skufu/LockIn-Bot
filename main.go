@@ -2,6 +2,7 @@ package main
 
 import (
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -46,6 +47,34 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to create bot: %v", err)
 	}
+
+	// Start a simple HTTP server for health checks in a goroutine
+	// This is often needed for PaaS like Render if not using a "worker" type,
+	// especially for free tiers that require a bound port.
+	go func() {
+		port := os.Getenv("PORT")
+		if port == "" {
+			port = "8080" // Default port if not set by Render (Render usually sets PORT)
+			log.Printf("Defaulting to port %s for health check server (PORT env var not set)", port)
+		} else {
+			log.Printf("Attempting to start health check server on port %s (from PORT env var)", port)
+		}
+
+		http.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			// Optionally, you could write a small status message
+			// fmt.Fprintln(w, "{\"status\": \"ok\"}")
+			// Or just an empty 200 OK is fine for health checks.
+		})
+
+		log.Printf("Health check server attempting to listen on :%s", port)
+		if err := http.ListenAndServe(":"+port, nil); err != nil {
+			// Log as fatal if the HTTP server is critical.
+			// If the bot can run without it (e.g., for local dev), perhaps just log.Error.
+			// For Render free tier, this server binding is critical for deployment.
+			log.Fatalf("Error starting health check server: %v", err)
+		}
+	}()
 
 	// Create and start the scheduler
 	scheduler := bot.NewScheduler(discordBot)
