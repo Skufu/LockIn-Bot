@@ -50,3 +50,22 @@ SET weekly_study_ms = 0;
 -- name: ResetMonthlyStudyTime :exec
 UPDATE user_stats
 SET monthly_study_ms = 0;
+
+-- name: GetLeaderboard :many
+SELECT
+    u.username,
+    us.total_study_ms,
+    u.user_id -- Also select user_id for mentions
+FROM
+    user_stats us
+JOIN
+    users u ON us.user_id = u.user_id
+WHERE
+    us.total_study_ms > 0 -- Only show users who have studied
+ORDER BY
+    us.total_study_ms DESC
+LIMIT 10; -- For top 10 users
+
+-- name: DeleteOldStudySessions :exec
+DELETE FROM study_sessions
+WHERE start_time < $1; -- $1 will be the cutoff timestamp (e.g., 6 months ago)

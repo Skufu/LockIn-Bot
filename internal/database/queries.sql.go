@@ -88,6 +88,18 @@ func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) (User, e
 	return i, err
 }
 
+const deleteOldStudySessions = `-- name: DeleteOldStudySessions :exec
+
+DELETE FROM study_sessions
+WHERE start_time < $1
+`
+
+// For top 10 users
+func (q *Queries) DeleteOldStudySessions(ctx context.Context, startTime time.Time) error {
+	_, err := q.db.ExecContext(ctx, deleteOldStudySessions, startTime)
+	return err
+}
+
 const endStudySession = `-- name: EndStudySession :one
 UPDATE study_sessions
 SET end_time = $2, duration_ms = EXTRACT(EPOCH FROM ($2 - start_time)) * 1000
@@ -130,6 +142,51 @@ func (q *Queries) GetActiveStudySession(ctx context.Context, userID sql.NullStri
 		&i.DurationMs,
 	)
 	return i, err
+}
+
+const getLeaderboard = `-- name: GetLeaderboard :many
+SELECT
+    u.username,
+    us.total_study_ms,
+    u.user_id -- Also select user_id for mentions
+FROM
+    user_stats us
+JOIN
+    users u ON us.user_id = u.user_id
+WHERE
+    us.total_study_ms > 0 -- Only show users who have studied
+ORDER BY
+    us.total_study_ms DESC
+LIMIT 10
+`
+
+type GetLeaderboardRow struct {
+	Username     sql.NullString `json:"username"`
+	TotalStudyMs sql.NullInt64  `json:"totalStudyMs"`
+	UserID       string         `json:"userId"`
+}
+
+func (q *Queries) GetLeaderboard(ctx context.Context) ([]GetLeaderboardRow, error) {
+	rows, err := q.db.QueryContext(ctx, getLeaderboard)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []GetLeaderboardRow
+	for rows.Next() {
+		var i GetLeaderboardRow
+		if err := rows.Scan(&i.Username, &i.TotalStudyMs, &i.UserID); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const getUser = `-- name: GetUser :one

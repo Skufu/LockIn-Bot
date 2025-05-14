@@ -3,6 +3,7 @@ package bot
 import (
 	"context"
 	"log"
+	"time"
 
 	"github.com/robfig/cron/v3"
 )
@@ -61,6 +62,28 @@ func (s *Scheduler) Start() {
 	})
 	if err != nil {
 		log.Printf("Error adding monthly reset job: %v", err)
+	}
+
+	// Job to delete old study sessions (older than 6 months)
+	// Runs daily at 3:05 AM server time
+	_, err = s.cron.AddFunc("0 5 3 * * *", func() {
+		log.Println("Running job to delete old study sessions (older than 6 months)...")
+		ctx := context.Background()
+		// Calculate the cutoff date (6 months ago)
+		// Note: AddDate(0, -6, 0) subtracts 6 months from the current date.
+		cutoffDate := time.Now().AddDate(0, -6, 0)
+
+		err := s.bot.db.DeleteOldStudySessions(ctx, cutoffDate)
+		if err != nil {
+			log.Printf("Error deleting old study sessions: %v", err)
+		} else {
+			// sqlc's :exec operations return a Result, but for delete, we might not get rows affected directly
+			// without more complex query or driver specific features. A success log is good.
+			log.Println("Successfully completed job to delete old study sessions.")
+		}
+	})
+	if err != nil {
+		log.Printf("Error adding job to delete old study sessions: %v", err)
 	}
 
 	s.cron.Start()

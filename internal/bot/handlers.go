@@ -11,11 +11,6 @@ import (
 	"github.com/bwmarrin/discordgo"
 )
 
-// handleReady is called when the bot connects to Discord
-func (b *Bot) handleReady(s *discordgo.Session, r *discordgo.Ready) {
-	log.Printf("Logged in as: %v#%v", s.State.User.Username, s.State.User.Discriminator)
-}
-
 // handleVoiceStateUpdate is called when a user's voice state changes
 func (b *Bot) handleVoiceStateUpdate(s *discordgo.Session, v *discordgo.VoiceStateUpdate) {
 	// Get the user

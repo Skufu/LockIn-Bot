@@ -7,14 +7,18 @@ package database
 import (
 	"context"
 	"database/sql"
+	"time"
 )
 
 type Querier interface {
 	CreateOrUpdateUserStats(ctx context.Context, arg CreateOrUpdateUserStatsParams) (UserStat, error)
 	CreateStudySession(ctx context.Context, arg CreateStudySessionParams) (StudySession, error)
 	CreateUser(ctx context.Context, arg CreateUserParams) (User, error)
+	// For top 10 users
+	DeleteOldStudySessions(ctx context.Context, startTime time.Time) error
 	EndStudySession(ctx context.Context, arg EndStudySessionParams) (StudySession, error)
 	GetActiveStudySession(ctx context.Context, userID sql.NullString) (StudySession, error)
+	GetLeaderboard(ctx context.Context) ([]GetLeaderboardRow, error)
 	GetUser(ctx context.Context, userID string) (User, error)
 	GetUserStats(ctx context.Context, userID string) (UserStat, error)
 	ResetDailyStudyTime(ctx context.Context) error
