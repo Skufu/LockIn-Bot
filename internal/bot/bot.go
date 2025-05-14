@@ -368,7 +368,7 @@ func (b *Bot) handleSlashHelpCommand(s *discordgo.Session, i *discordgo.Interact
 			},
 			{
 				Name:  "`/leaderboard`",
-				Value: "Displays the top users by voice channel time (Coming Soon!).",
+				Value: "Displays the top users by voice channel time.",
 			},
 			{
 				Name:  "`/help`",
