@@ -173,19 +173,19 @@ func (b *Bot) handleStudyCommand(s *discordgo.Session, m *discordgo.MessageCreat
 
 // formatDuration converts a time.Duration to a human-readable string
 // e.g., "2h 15m 30s" or "45m 20s"
-func formatDuration(d time.Duration) string {
-	d = d.Round(time.Second)
-	h := d / time.Hour
-	d -= h * time.Hour
-	m := d / time.Minute
-	d -= m * time.Minute
-	s := d / time.Second
-
-	if h > 0 {
-		return fmt.Sprintf("%dh %dm %ds", h, m, s)
-	}
-	if m > 0 {
-		return fmt.Sprintf("%dm %ds", m, s)
-	}
-	return fmt.Sprintf("%ds", s)
-}
+// func formatDuration(d time.Duration) string {
+// 	d = d.Round(time.Second)
+// 	h := d / time.Hour
+// 	d -= h * time.Hour
+// 	m := d / time.Minute
+// 	d -= m * time.Minute
+// 	s := d / time.Second
+//
+// 	if h > 0 {
+// 		return fmt.Sprintf("%dh %dm %ds", h, m, s)
+// 	}
+// 	if m > 0 {
+// 		return fmt.Sprintf("%dm %ds", m, s)
+// 	}
+// 	return fmt.Sprintf("%ds", s)
+// }

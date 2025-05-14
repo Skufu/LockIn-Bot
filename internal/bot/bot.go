@@ -78,41 +78,75 @@ func (b *Bot) endAllActiveSessions() {
 	b.activeSessionMu.Lock()
 	defer b.activeSessionMu.Unlock()
 
+	ctx := context.Background() // Create a context for database operations
 	now := time.Now()
+
+	if len(b.activeSessions) == 0 {
+		log.Println("No active study sessions to end on shutdown.")
+		return
+	}
+
+	log.Printf("Attempting to end %d active study session(s) on shutdown...", len(b.activeSessions))
+
 	for userID, startTime := range b.activeSessions {
-		log.Printf("Ending session for user %s on bot shutdown", userID)
+		log.Printf("Processing shutdown for user %s (session started at %v)", userID, startTime)
 
-		// End the session in the DB
-		// Note: We don't have the session ID here, so we'd need to implement
-		// a different query to find and end the active session by user ID
 		duration := now.Sub(startTime)
-		durationMs := duration.Milliseconds()
+		// durationMs := duration.Milliseconds() // This was calculated but not used in the original placeholder
 
-		// This is a placeholder - in a real implementation, you would:
 		// 1. Find the active session ID for this user
-		// 2. End that specific session
+		activeDBSession, err := b.db.GetActiveStudySession(ctx, sql.NullString{String: userID, Valid: true})
+		if err != nil {
+			log.Printf("Error getting active DB session for user %s during shutdown: %v. Session may not be ended correctly.", userID, err)
+			continue // Skip to the next user
+		}
+
+		// 2. End that specific session in the DB
+		endedSession, err := b.db.EndStudySession(ctx, database.EndStudySessionParams{
+			SessionID: activeDBSession.SessionID,
+			EndTime:   sql.NullTime{Time: now, Valid: true},
+		})
+		if err != nil {
+			log.Printf("Error ending DB study session %d for user %s during shutdown: %v. Stats may not be updated.", activeDBSession.SessionID, userID, err)
+			continue // Skip to the next user
+		}
+
+		log.Printf("Successfully ended DB session %d for user %s on shutdown. Duration: %d ms.", endedSession.SessionID, userID, endedSession.DurationMs.Int64)
+
 		// 3. Update user stats
-		log.Printf("User %s studied for %v (%d ms)", userID, duration, durationMs)
+		if endedSession.DurationMs.Valid && endedSession.DurationMs.Int64 > 0 {
+			_, err = b.db.CreateOrUpdateUserStats(ctx, database.CreateOrUpdateUserStatsParams{
+				UserID:       userID,
+				TotalStudyMs: sql.NullInt64{Int64: endedSession.DurationMs.Int64, Valid: true},
+			})
+			if err != nil {
+				log.Printf("Error updating user stats for user %s during shutdown after session %d: %v", userID, endedSession.SessionID, err)
+			}
+		}
 
 		// If LoggingChannelID is set, also send a message about the shutdown-ended session
 		if b.LoggingChannelID != "" {
-			username := userID // We don't have the username directly here, ideally fetch it or log UserID
-			// Consider fetching username if this message is important. For now, using UserID.
-			// Potentially fetch from DB if user was created, or make a Discord API call (expensive on shutdown)
-
-			// Attempt to get user object from Discord state (might not always be available)
-			discordUser, err := b.session.User(userID)
-			if err == nil && discordUser != nil {
+			username := userID                             // Default to UserID
+			discordUser, userErr := b.session.User(userID) // Attempt to get full user info
+			if userErr == nil && discordUser != nil {
 				username = discordUser.Username
 			}
 
-			message := fmt.Sprintf("<@%s> (%s) session ended due to bot shutdown after %s.", userID, username, formatDuration(duration))
-			_, err = b.session.ChannelMessageSend(b.LoggingChannelID, message)
-			if err != nil {
-				log.Printf("Error sending shutdown session message to Discord channel %s: %v", b.LoggingChannelID, err)
+			// Use the duration from the ended DB session for consistency if available, otherwise fallback to in-memory calculation
+			finalDuration := duration // Fallback
+			if endedSession.DurationMs.Valid {
+				finalDuration = time.Duration(endedSession.DurationMs.Int64) * time.Millisecond
+			}
+
+			message := fmt.Sprintf("<@%s> (%s) session ended due to bot shutdown after %s.", userID, username, formatDuration(finalDuration))
+			_, sendErr := b.session.ChannelMessageSend(b.LoggingChannelID, message)
+			if sendErr != nil {
+				log.Printf("Error sending shutdown session message to Discord channel %s for user %s: %v", b.LoggingChannelID, userID, sendErr)
 			}
 		}
+		delete(b.activeSessions, userID) // Remove from in-memory map after processing
 	}
+	log.Println("Finished processing active sessions on shutdown.")
 }
 
 func (b *Bot) handleReady(s *discordgo.Session, r *discordgo.Ready) {
@@ -207,8 +241,23 @@ func (b *Bot) handleSlashStatsCommand(s *discordgo.Session, i *discordgo.Interac
 		username = i.User.Username
 	}
 
+	// DEFER THE RESPONSE INITIALLY
+	err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
+		// Optionally, make the deferred message ephemeral if you want the final stats to also be ephemeral.
+		// Data: &discordgo.InteractionResponseData{
+		// 	Flags: discordgo.MessageFlagsEphemeral,
+		// },
+	})
+	if err != nil {
+		log.Printf("Error sending deferred interaction response for /stats: %v", err)
+		// If we can't even defer, we probably can't edit later either.
+		// You might want to just return or try a simple error message if deferral fails.
+		return
+	}
+
 	// Check if user exists
-	_, err := b.db.GetUser(ctx, userID)
+	_, err = b.db.GetUser(ctx, userID)
 	if err != nil {
 		// Create the user if they don't exist
 		_, createErr := b.db.CreateUser(ctx, database.CreateUserParams{
@@ -217,13 +266,13 @@ func (b *Bot) handleSlashStatsCommand(s *discordgo.Session, i *discordgo.Interac
 		})
 		if createErr != nil {
 			log.Printf("Error creating user via slash command: %v", createErr)
-			s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-				Type: discordgo.InteractionResponseChannelMessageWithSource,
-				Data: &discordgo.InteractionResponseData{
-					Content: "Error creating your user profile. Please try again or join a voice channel first.",
-					Flags:   discordgo.MessageFlagsEphemeral,
-				},
+			content := "Error creating your user profile. Please try again or join a voice channel first."
+			_, err := s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
+				Content: &content,
 			})
+			if err != nil {
+				log.Printf("Error editing interaction for user creation error: %v", err)
+			}
 			return
 		}
 	}
@@ -231,13 +280,14 @@ func (b *Bot) handleSlashStatsCommand(s *discordgo.Session, i *discordgo.Interac
 	// Get user stats
 	stats, err := b.db.GetUserStats(ctx, userID)
 	if err != nil {
-		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-			Type: discordgo.InteractionResponseChannelMessageWithSource,
-			Data: &discordgo.InteractionResponseData{
-				Content: "You haven't studied yet! Join a voice channel to start tracking your study time.",
-				// No Ephemeral flag here, so message is visible
-			},
+		content := "You haven't studied yet! Join a voice channel to start tracking your study time."
+		_, err := s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
+			Content: &content,
+			// Note: Original did not have Ephemeral flag here, so message would be public.
 		})
+		if err != nil {
+			log.Printf("Error editing interaction for no stats yet: %v", err)
+		}
 		return
 	}
 
@@ -275,14 +325,12 @@ func (b *Bot) handleSlashStatsCommand(s *discordgo.Session, i *discordgo.Interac
 		Footer:    &discordgo.MessageEmbedFooter{Text: "Keep up the good work!"},
 	}
 
-	err = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-		Type: discordgo.InteractionResponseChannelMessageWithSource,
-		Data: &discordgo.InteractionResponseData{
-			Embeds: []*discordgo.MessageEmbed{embed},
-		},
+	// Send the embed as an edit to the original deferred response
+	_, err = s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
+		Embeds: &[]*discordgo.MessageEmbed{embed},
 	})
 	if err != nil {
-		log.Printf("Error sending slash command response for /stats: %v", err)
+		log.Printf("Error sending slash command response edit for /stats: %v", err)
 	}
 }
 
@@ -391,24 +439,24 @@ func (b *Bot) handleSlashHelpCommand(s *discordgo.Session, i *discordgo.Interact
 	}
 }
 
-// formatDuration is defined in handlers.go within the same package
-// // formatDuration (copied from internal/commands/time_tracking.go for now, can be moved to a common utils package)
-// func formatDuration(d time.Duration) string {
-// 	d = d.Round(time.Second)
-// 	h := d / time.Hour
-// 	d -= h * time.Hour
-// 	m := d / time.Minute
-// 	d -= m * time.Minute
-// 	s := d / time.Second
-//
-// 	if h > 0 {
-// 		return fmt.Sprintf("%dh %dm %ds", h, m, s)
-// 	}
-// 	if m > 0 {
-// 		return fmt.Sprintf("%dm %ds", m, s)
-// 	}
-// 	return fmt.Sprintf("%ds", s)
-// }
+// formatDuration converts a time.Duration to a human-readable string
+// e.g., "2h 15m 30s" or "45m 20s"
+func formatDuration(d time.Duration) string {
+	d = d.Round(time.Second)
+	h := d / time.Hour
+	d -= h * time.Hour
+	m := d / time.Minute
+	d -= m * time.Minute
+	s := d / time.Second
+
+	if h > 0 {
+		return fmt.Sprintf("%dh %dm %ds", h, m, s)
+	}
+	if m > 0 {
+		return fmt.Sprintf("%dm %ds", m, s)
+	}
+	return fmt.Sprintf("%ds", s)
+}
 
 // handleVoiceStateUpdate is called when a user's voice state changes
 func (b *Bot) handleVoiceStateUpdate(s *discordgo.Session, v *discordgo.VoiceStateUpdate) {
@@ -446,9 +494,3 @@ func (b *Bot) handleVoiceStateUpdate(s *discordgo.Session, v *discordgo.VoiceSta
 		b.handleUserLeftVoice(s, v, user)
 	}
 }
-
-// handleUserJoinedVoice processes a user joining a voice channel
-// ... existing code (no changes needed here as the decision to call it is now made in handleVoiceStateUpdate) ...
-
-// handleUserLeftVoice processes a user leaving a voice channel
-// ... existing code (no changes needed here) ...
