@@ -1,5 +1,5 @@
 # Stage 1: Build the Go application
-FROM golang:1.21-alpine AS builder
+FROM golang:1.24-alpine AS builder
 
 WORKDIR /app
 
@@ -33,4 +33,4 @@ COPY db/migrations ./db/migrations
 
 # Set the command to run the application
 # The application will pick up environment variables set in Render.
-CMD ["/app/lockin-bot"] 
+CMD ["/app/lockin-bot"]
