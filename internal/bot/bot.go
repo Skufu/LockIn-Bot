@@ -14,19 +14,20 @@ import (
 
 // Bot represents the Discord bot
 type Bot struct {
-	session          *discordgo.Session
-	db               *database.Queries
-	activeSessions   map[string]time.Time // Maps user_id to session start time
-	activeSessionMu  sync.Mutex
-	LoggingChannelID string // Added to store the logging channel ID
-	testGuildID      string // Added to store the test guild ID for command registration
+	session                *discordgo.Session
+	db                     *database.Queries
+	activeSessions         map[string]time.Time // Maps user_id to session start time
+	activeSessionMu        sync.Mutex
+	LoggingChannelID       string              // Added to store the logging channel ID
+	testGuildID            string              // Added to store the test guild ID for command registration
+	allowedVoiceChannelIDs map[string]struct{} // For storing allowed voice channel IDs
 
 	// Slash command specific fields
 	commandHandlers map[string]func(s *discordgo.Session, i *discordgo.InteractionCreate)
 }
 
 // New creates a new Discord bot instance
-func New(token string, db *database.Queries, loggingChannelID string, testGuildID string) (*Bot, error) {
+func New(token string, db *database.Queries, loggingChannelID string, testGuildID string, allowedVCs map[string]struct{}) (*Bot, error) {
 	// Create a new Discord session
 	dg, err := discordgo.New("Bot " + token)
 	if err != nil {
@@ -34,12 +35,13 @@ func New(token string, db *database.Queries, loggingChannelID string, testGuildI
 	}
 
 	bot := &Bot{
-		session:          dg,
-		db:               db,
-		activeSessions:   make(map[string]time.Time),
-		LoggingChannelID: loggingChannelID, // Store the logging channel ID
-		testGuildID:      testGuildID,      // Store the test guild ID
-		commandHandlers:  make(map[string]func(s *discordgo.Session, i *discordgo.InteractionCreate)),
+		session:                dg,
+		db:                     db,
+		activeSessions:         make(map[string]time.Time),
+		LoggingChannelID:       loggingChannelID, // Store the logging channel ID
+		testGuildID:            testGuildID,      // Store the test guild ID
+		allowedVoiceChannelIDs: allowedVCs,       // Store the allowed voice channels map
+		commandHandlers:        make(map[string]func(s *discordgo.Session, i *discordgo.InteractionCreate)),
 	}
 
 	// Register slash command handlers here
@@ -407,3 +409,46 @@ func (b *Bot) handleSlashHelpCommand(s *discordgo.Session, i *discordgo.Interact
 // 	}
 // 	return fmt.Sprintf("%ds", s)
 // }
+
+// handleVoiceStateUpdate is called when a user's voice state changes
+func (b *Bot) handleVoiceStateUpdate(s *discordgo.Session, v *discordgo.VoiceStateUpdate) {
+	// Get the user
+	user, err := s.User(v.UserID)
+	if err != nil {
+		log.Printf("Error getting user: %v", err)
+		return
+	}
+
+	// Ignore bot events
+	if user.Bot {
+		return
+	}
+
+	// Check if specific voice channels are configured for tracking
+	trackSpecificChannels := len(b.allowedVoiceChannelIDs) > 0
+
+	if v.ChannelID != "" { // User is in some voice channel
+		isAllowedChannel := true // Assume allowed if not configured to restrict
+		if trackSpecificChannels {
+			_, isAllowedChannel = b.allowedVoiceChannelIDs[v.ChannelID]
+		}
+
+		if isAllowedChannel {
+			// User is in an allowed channel (or all channels are allowed)
+			b.handleUserJoinedVoice(s, v, user)
+		} else {
+			// User is in a non-allowed channel, ensure any existing session is ended
+			log.Printf("User %s (%s) joined non-tracked voice channel %s. Ending any active session.", user.Username, v.UserID, v.ChannelID)
+			b.handleUserLeftVoice(s, v, user) // Treat as if they left a tracked session context
+		}
+	} else { // User left all voice channels
+		// User left all voice channels, end their session as usual
+		b.handleUserLeftVoice(s, v, user)
+	}
+}
+
+// handleUserJoinedVoice processes a user joining a voice channel
+// ... existing code (no changes needed here as the decision to call it is now made in handleVoiceStateUpdate) ...
+
+// handleUserLeftVoice processes a user leaving a voice channel
+// ... existing code (no changes needed here) ...

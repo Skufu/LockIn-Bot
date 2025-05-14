@@ -11,30 +11,6 @@ import (
 	"github.com/bwmarrin/discordgo"
 )
 
-// handleVoiceStateUpdate is called when a user's voice state changes
-func (b *Bot) handleVoiceStateUpdate(s *discordgo.Session, v *discordgo.VoiceStateUpdate) {
-	// Get the user
-	user, err := s.User(v.UserID)
-	if err != nil {
-		log.Printf("Error getting user: %v", err)
-		return
-	}
-
-	// Ignore bot events
-	if user.Bot {
-		return
-	}
-
-	// Determine if user joined or left a voice channel
-	if v.ChannelID != "" {
-		// User joined or moved to a voice channel
-		b.handleUserJoinedVoice(s, v, user)
-	} else {
-		// User left a voice channel
-		b.handleUserLeftVoice(s, v, user)
-	}
-}
-
 // handleUserJoinedVoice processes a user joining a voice channel
 func (b *Bot) handleUserJoinedVoice(s *discordgo.Session, v *discordgo.VoiceStateUpdate, user *discordgo.User) {
 	ctx := context.Background()
