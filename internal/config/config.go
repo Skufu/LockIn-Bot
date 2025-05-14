@@ -9,12 +9,13 @@ import (
 
 // Config holds all configuration for the application
 type Config struct {
-	DiscordToken string
-	DBHost       string
-	DBPort       string
-	DBUser       string
-	DBPassword   string
-	DBName       string
+	DiscordToken     string
+	DBHost           string
+	DBPort           string
+	DBUser           string
+	DBPassword       string
+	DBName           string
+	LoggingChannelID string
 }
 
 // Load reads configuration from .env file or environment variables
@@ -33,17 +34,22 @@ func Load() (*Config, error) {
 
 	// Use environment variables with fallbacks
 	config := &Config{
-		DiscordToken: os.Getenv("DISCORD_TOKEN"),
-		DBHost:       getEnvWithDefault("DB_HOST", "localhost"),
-		DBPort:       getEnvWithDefault("DB_PORT", "5432"),
-		DBUser:       getEnvWithDefault("DB_USER", "postgres"),
-		DBPassword:   os.Getenv("DB_PASSWORD"),
-		DBName:       getEnvWithDefault("DB_NAME", "lockinbot"),
+		DiscordToken:     os.Getenv("DISCORD_TOKEN"),
+		DBHost:           getEnvWithDefault("DB_HOST", "localhost"),
+		DBPort:           getEnvWithDefault("DB_PORT", "5432"),
+		DBUser:           getEnvWithDefault("DB_USER", "postgres"),
+		DBPassword:       os.Getenv("DB_PASSWORD"),
+		DBName:           getEnvWithDefault("DB_NAME", "lockinbot"),
+		LoggingChannelID: os.Getenv("LOGGING_CHANNEL_ID"),
 	}
 
 	// Additional validation
 	if config.DBPassword == "" {
 		return nil, fmt.Errorf("DB_PASSWORD environment variable is required")
+	}
+
+	if config.LoggingChannelID == "" {
+		fmt.Println("Info: LOGGING_CHANNEL_ID environment variable is not set. Study time announcements will be disabled.")
 	}
 
 	return config, nil

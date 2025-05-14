@@ -12,15 +12,16 @@ import (
 
 // Bot represents the Discord bot
 type Bot struct {
-	session         *discordgo.Session
-	db              *database.Queries
-	router          *commands.Router
-	activeSessions  map[string]time.Time // Maps user_id to session start time
-	activeSessionMu sync.Mutex
+	session          *discordgo.Session
+	db               *database.Queries
+	router           *commands.Router
+	activeSessions   map[string]time.Time // Maps user_id to session start time
+	activeSessionMu  sync.Mutex
+	LoggingChannelID string // Added to store the logging channel ID
 }
 
 // New creates a new Discord bot instance
-func New(token string, db *database.Queries) (*Bot, error) {
+func New(token string, db *database.Queries, loggingChannelID string) (*Bot, error) {
 	// Create a new Discord session
 	dg, err := discordgo.New("Bot " + token)
 	if err != nil {
@@ -34,10 +35,11 @@ func New(token string, db *database.Queries) (*Bot, error) {
 	commands.RegisterTimeTrackingCommands(router)
 
 	bot := &Bot{
-		session:        dg,
-		db:             db,
-		router:         router,
-		activeSessions: make(map[string]time.Time),
+		session:          dg,
+		db:               db,
+		router:           router,
+		activeSessions:   make(map[string]time.Time),
+		LoggingChannelID: loggingChannelID, // Store the logging channel ID
 	}
 
 	// Register handlers

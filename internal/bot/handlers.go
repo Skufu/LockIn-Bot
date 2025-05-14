@@ -127,6 +127,15 @@ func (b *Bot) handleUserLeftVoice(s *discordgo.Session, v *discordgo.VoiceStateU
 
 		duration := time.Duration(durationMs) * time.Millisecond
 		log.Printf("User %s studied for %v (%d ms)", v.UserID, duration, durationMs)
+
+		// Send message to Discord if LoggingChannelID is set
+		if b.LoggingChannelID != "" {
+			message := fmt.Sprintf("<@%s> has spent %s studying!", v.UserID, formatDuration(duration))
+			_, err := s.ChannelMessageSend(b.LoggingChannelID, message)
+			if err != nil {
+				log.Printf("Error sending message to Discord channel %s: %v", b.LoggingChannelID, err)
+			}
+		}
 	}
 }
 
