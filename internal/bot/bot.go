@@ -19,13 +19,14 @@ type Bot struct {
 	activeSessions   map[string]time.Time // Maps user_id to session start time
 	activeSessionMu  sync.Mutex
 	LoggingChannelID string // Added to store the logging channel ID
+	testGuildID      string // Added to store the test guild ID for command registration
 
 	// Slash command specific fields
 	commandHandlers map[string]func(s *discordgo.Session, i *discordgo.InteractionCreate)
 }
 
 // New creates a new Discord bot instance
-func New(token string, db *database.Queries, loggingChannelID string) (*Bot, error) {
+func New(token string, db *database.Queries, loggingChannelID string, testGuildID string) (*Bot, error) {
 	// Create a new Discord session
 	dg, err := discordgo.New("Bot " + token)
 	if err != nil {
@@ -37,6 +38,7 @@ func New(token string, db *database.Queries, loggingChannelID string) (*Bot, err
 		db:               db,
 		activeSessions:   make(map[string]time.Time),
 		LoggingChannelID: loggingChannelID, // Store the logging channel ID
+		testGuildID:      testGuildID,      // Store the test guild ID
 		commandHandlers:  make(map[string]func(s *discordgo.Session, i *discordgo.InteractionCreate)),
 	}
 
@@ -113,10 +115,14 @@ func (b *Bot) endAllActiveSessions() {
 
 func (b *Bot) handleReady(s *discordgo.Session, r *discordgo.Ready) {
 	log.Printf("Logged in as: %v#%v", s.State.User.Username, s.State.User.Discriminator)
-	log.Println("Registering slash commands for testing guild...")
 
-	// Guild ID for faster testing - replace with "" for global commands in production
-	guildID := "1371769613104185508"
+	guildID := b.testGuildID // Use the configured testGuildID
+
+	if guildID == "" {
+		log.Println("Registering GLOBAL slash commands...")
+	} else {
+		log.Printf("Registering slash commands for TEST guild ID: %s", guildID)
+	}
 
 	commands := []*discordgo.ApplicationCommand{
 		{
@@ -139,7 +145,7 @@ func (b *Bot) handleReady(s *discordgo.Session, r *discordgo.Ready) {
 	// s.ApplicationCommandCreate(s.State.User.ID, "YOUR_GUILD_ID", cmd)
 	registeredCommands := make([]*discordgo.ApplicationCommand, len(commands))
 	for i, cmd := range commands {
-		regCmd, err := s.ApplicationCommandCreate(s.State.User.ID, guildID, cmd) // Using guildID for testing
+		regCmd, err := s.ApplicationCommandCreate(s.State.User.ID, guildID, cmd) // Using configured guildID
 		if err != nil {
 			log.Printf("Cannot create '%v' command in guild %s: %v", cmd.Name, guildID, err)
 		} else {

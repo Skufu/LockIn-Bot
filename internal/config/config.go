@@ -16,6 +16,7 @@ type Config struct {
 	DBPassword       string
 	DBName           string
 	LoggingChannelID string
+	TestGuildID      string
 }
 
 // Load reads configuration from .env file or environment variables
@@ -41,6 +42,7 @@ func Load() (*Config, error) {
 		DBPassword:       os.Getenv("DB_PASSWORD"),
 		DBName:           getEnvWithDefault("DB_NAME", "lockinbot"),
 		LoggingChannelID: os.Getenv("LOGGING_CHANNEL_ID"),
+		TestGuildID:      os.Getenv("TEST_GUILD_ID"),
 	}
 
 	// Additional validation
