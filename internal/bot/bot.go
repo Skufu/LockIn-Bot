@@ -8,7 +8,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Skufu/LockIn-Bot/internal/config"
 	"github.com/Skufu/LockIn-Bot/internal/database"
+	"github.com/Skufu/LockIn-Bot/internal/service"
 	"github.com/bwmarrin/discordgo"
 )
 
@@ -18,29 +20,41 @@ type Bot struct {
 	db                     *database.Queries
 	activeSessions         map[string]time.Time // Maps user_id to session start time
 	activeSessionMu        sync.Mutex
-	LoggingChannelID       string              // Added to store the logging channel ID
-	testGuildID            string              // Added to store the test guild ID for command registration
-	allowedVoiceChannelIDs map[string]struct{} // For storing allowed voice channel IDs
+	LoggingChannelID       string                 // Added to store the logging channel ID
+	testGuildID            string                 // Added to store the test guild ID for command registration
+	allowedVoiceChannelIDs map[string]struct{}    // For storing allowed voice channel IDs
+	cfg                    *config.Config         // Store the full config
+	streakService          *service.StreakService // Added streak service
 
 	// Slash command specific fields
 	commandHandlers map[string]func(s *discordgo.Session, i *discordgo.InteractionCreate)
 }
 
 // New creates a new Discord bot instance
-func New(token string, db *database.Queries, loggingChannelID string, testGuildID string, allowedVCs map[string]struct{}) (*Bot, error) {
+func New(token string, db *database.Queries, appConfig *config.Config, allowedVCs map[string]struct{}) (*Bot, error) {
 	// Create a new Discord session
 	dg, err := discordgo.New("Bot " + token)
 	if err != nil {
 		return nil, err
 	}
 
+	// Make a copy of the allowed VCs map from config
+	currentAllowedVCs := make(map[string]struct{})
+	if appConfig.AllowedVoiceChannelIDsMap != nil {
+		for id := range appConfig.AllowedVoiceChannelIDsMap {
+			currentAllowedVCs[id] = struct{}{}
+		}
+	}
+
 	bot := &Bot{
 		session:                dg,
 		db:                     db,
 		activeSessions:         make(map[string]time.Time),
-		LoggingChannelID:       loggingChannelID, // Store the logging channel ID
-		testGuildID:            testGuildID,      // Store the test guild ID
-		allowedVoiceChannelIDs: allowedVCs,       // Store the allowed voice channels map
+		LoggingChannelID:       appConfig.LoggingChannelID,
+		testGuildID:            appConfig.TestGuildID,
+		allowedVoiceChannelIDs: currentAllowedVCs,
+		cfg:                    appConfig,
+		streakService:          nil,
 		commandHandlers:        make(map[string]func(s *discordgo.Session, i *discordgo.InteractionCreate)),
 	}
 
@@ -48,6 +62,7 @@ func New(token string, db *database.Queries, loggingChannelID string, testGuildI
 	bot.commandHandlers["stats"] = bot.handleSlashStatsCommand
 	bot.commandHandlers["leaderboard"] = bot.handleSlashLeaderboardCommand
 	bot.commandHandlers["help"] = bot.handleSlashHelpCommand
+	bot.commandHandlers["streak"] = bot.handleSlashStreakCommand
 
 	// Register handlers
 	dg.AddHandler(bot.handleReady)
@@ -55,7 +70,7 @@ func New(token string, db *database.Queries, loggingChannelID string, testGuildI
 	dg.AddHandler(bot.handleInteractionCreate)
 
 	// We only care about voice and guild messages
-	dg.Identify.Intents = discordgo.IntentsGuildVoiceStates | discordgo.IntentsGuildMessages
+	dg.Identify.Intents = discordgo.IntentsGuildVoiceStates | discordgo.IntentsGuildMessages | discordgo.IntentsMessageContent
 
 	// Open the websocket and begin listening
 	err = dg.Open()
@@ -64,6 +79,11 @@ func New(token string, db *database.Queries, loggingChannelID string, testGuildI
 	}
 
 	return bot, nil
+}
+
+// Session returns the underlying discordgo session
+func (b *Bot) Session() *discordgo.Session {
+	return b.session
 }
 
 // Close closes the Discord session
@@ -172,6 +192,10 @@ func (b *Bot) handleReady(s *discordgo.Session, r *discordgo.Ready) {
 		{
 			Name:        "help",
 			Description: "Shows available commands and information about the bot.",
+		},
+		{
+			Name:        "streak",
+			Description: "Check your current study streak!",
 		},
 	}
 
@@ -460,37 +484,259 @@ func formatDuration(d time.Duration) string {
 
 // handleVoiceStateUpdate is called when a user's voice state changes
 func (b *Bot) handleVoiceStateUpdate(s *discordgo.Session, v *discordgo.VoiceStateUpdate) {
-	// Get the user
+	// --- Streak Service Integration --- START
+	if b.streakService != nil {
+		// Call StreakService's handler in a goroutine to prevent blocking event processing.
+		// The StreakService will internally check if the channel is tracked and if the user is joining.
+		go func() {
+			ctx := context.Background()
+			err := b.streakService.HandleVoiceActivity(ctx, v.UserID, v.GuildID, v.ChannelID) // v.ChannelID is the new channel, empty if leaving all
+			if err != nil {
+				log.Printf("Error in StreakService.HandleVoiceActivity for user %s: %v", v.UserID, err)
+			}
+		}()
+	} else {
+		log.Println("Warning: StreakService is not initialized in Bot, skipping streak handling for VoiceStateUpdate.")
+	}
+	// --- Streak Service Integration --- END
+
+	// Existing Study Session Logic (adapted from your previous handlers.go content)
 	user, err := s.User(v.UserID)
 	if err != nil {
-		log.Printf("Error getting user: %v", err)
+		log.Printf("Error getting user %s for study session logic: %v", v.UserID, err)
+		// Depending on how critical user object is, you might return or proceed cautiously
+	}
+
+	b.activeSessionMu.Lock()
+	_, userWasInTrackedSession := b.activeSessions[v.UserID]
+	b.activeSessionMu.Unlock()
+
+	// Determine current state
+	userJoinedNewChannel := v.ChannelID != "" && (v.BeforeUpdate == nil || v.BeforeUpdate.ChannelID != v.ChannelID)
+	completelyLeftVoice := v.ChannelID == "" && (v.BeforeUpdate != nil && v.BeforeUpdate.ChannelID != "")
+
+	// Check if the new channel (if any) is tracked for study sessions
+	newChannelIsTracked := false
+	if v.ChannelID != "" {
+		if _, ok := b.allowedVoiceChannelIDs[v.ChannelID]; ok {
+			newChannelIsTracked = true
+		}
+	}
+
+	// Check if the old channel (if any) was tracked for study sessions
+	oldChannelWasTracked := false
+	if v.BeforeUpdate != nil && v.BeforeUpdate.ChannelID != "" {
+		if _, ok := b.allowedVoiceChannelIDs[v.BeforeUpdate.ChannelID]; ok {
+			oldChannelWasTracked = true
+		}
+	}
+
+	// Logic for Study Sessions:
+	if userJoinedNewChannel {
+		if newChannelIsTracked {
+			if !userWasInTrackedSession { // Started new session in a tracked channel
+				log.Printf("User %s joined tracked VC %s. Starting study session.", v.UserID, v.ChannelID)
+				b.handleUserJoinedStudySession(s, v, user)
+			} else if oldChannelWasTracked && v.BeforeUpdate.ChannelID != v.ChannelID {
+				// Moved between two tracked VCs - current study session logic might implicitly handle this by not ending/restarting.
+				log.Printf("User %s moved between tracked VCs (%s -> %s). Study session continues.", v.UserID, v.BeforeUpdate.ChannelID, v.ChannelID)
+			} else if !oldChannelWasTracked { // Moved from untracked to tracked
+				log.Printf("User %s moved from untracked to tracked VC %s. Starting study session.", v.UserID, v.ChannelID)
+				b.handleUserJoinedStudySession(s, v, user)
+			}
+		} else { // Joined/moved to an untracked channel
+			if userWasInTrackedSession { // Was in a tracked channel, now in untracked: end session
+				log.Printf("User %s moved from tracked to untracked VC %s. Ending study session.", v.UserID, v.ChannelID)
+				b.handleUserLeftStudySession(s, v, user) // Pass v, it has BeforeUpdate for context
+			}
+		}
+	} else if completelyLeftVoice {
+		if userWasInTrackedSession && oldChannelWasTracked { // Left from a tracked channel
+			log.Printf("User %s left tracked VC %s. Ending study session.", v.UserID, v.BeforeUpdate.ChannelID)
+			b.handleUserLeftStudySession(s, v, user)
+		}
+	}
+}
+
+// handleUserJoinedStudySession (ensure this and Left are methods on Bot or accessible)
+// This is where you'd put the logic from your old bot.handleUserJoinedVoice
+func (b *Bot) handleUserJoinedStudySession(s *discordgo.Session, v *discordgo.VoiceStateUpdate, user *discordgo.User) {
+	ctx := context.Background()
+	b.activeSessionMu.Lock()
+	defer b.activeSessionMu.Unlock()
+
+	if _, exists := b.activeSessions[v.UserID]; exists {
+		log.Printf("User %s already has an active study session, not starting new one.", v.UserID)
+		return
+	}
+	now := time.Now()
+	b.activeSessions[v.UserID] = now
+
+	dbUserParams := database.CreateUserParams{
+		UserID: v.UserID,
+	}
+	if user != nil {
+		dbUserParams.Username = sql.NullString{String: user.Username, Valid: true}
+	} else {
+		dbUserParams.Username = sql.NullString{String: "UnknownUser-" + v.UserID[:6], Valid: true} // Fallback username
+	}
+
+	_, err := b.db.CreateUser(ctx, dbUserParams)
+	if err != nil {
+		log.Printf("Error creating/updating user %s for study session: %v", v.UserID, err)
+	}
+
+	session, err := b.db.CreateStudySession(ctx, database.CreateStudySessionParams{
+		UserID:    sql.NullString{String: v.UserID, Valid: true},
+		StartTime: now,
+	})
+	if err != nil {
+		log.Printf("Error creating study session for user %s: %v", v.UserID, err)
+	} else {
+		log.Printf("Started study session %d for user %s in VC %s", session.SessionID, v.UserID, v.ChannelID)
+	}
+}
+
+// handleUserLeftStudySession (ensure this and Joined are methods on Bot or accessible)
+// This is where you'd put the logic from your old bot.handleUserLeftVoice
+func (b *Bot) handleUserLeftStudySession(s *discordgo.Session, v *discordgo.VoiceStateUpdate, user *discordgo.User) {
+	ctx := context.Background()
+	b.activeSessionMu.Lock()
+	defer b.activeSessionMu.Unlock()
+
+	if _, exists := b.activeSessions[v.UserID]; !exists {
+		log.Printf("No active study session found for user %s to end.", v.UserID)
+		return
+	}
+	now := time.Now()
+	delete(b.activeSessions, v.UserID)
+
+	// v.BeforeUpdate should be non-nil if user truly left a channel
+	// However, if this is called due to moving to untracked, v.BeforeUpdate might be the state *before* moving to untracked.
+	// We need the session associated with this user_id that is active.
+	activeSession, err := b.db.GetActiveStudySession(ctx, sql.NullString{String: v.UserID, Valid: true})
+	if err != nil {
+		log.Printf("Error getting active study session for user %s to end: %v", v.UserID, err)
 		return
 	}
 
-	// Ignore bot events
-	if user.Bot {
+	endedSession, err := b.db.EndStudySession(ctx, database.EndStudySessionParams{
+		SessionID: activeSession.SessionID,
+		EndTime:   sql.NullTime{Time: now, Valid: true},
+	})
+	if err != nil {
+		log.Printf("Error ending study session %d for user %s: %v", activeSession.SessionID, v.UserID, err)
+		return
+	}
+	log.Printf("Ended study session %d for user %s. Duration: %dms", endedSession.SessionID, v.UserID, endedSession.DurationMs.Int64)
+
+	if endedSession.DurationMs.Valid && endedSession.DurationMs.Int64 > 0 {
+		durationMs := endedSession.DurationMs.Int64
+		_, err = b.db.CreateOrUpdateUserStats(ctx, database.CreateOrUpdateUserStatsParams{
+			UserID:       v.UserID,
+			TotalStudyMs: sql.NullInt64{Int64: durationMs, Valid: true},
+			// Ensure other stats fields are handled as per your DB schema and logic for CreateOrUpdateUserStats
+		})
+		if err != nil {
+			log.Printf("Error updating user stats for %s post-study: %v", v.UserID, err)
+		}
+
+		duration := time.Duration(durationMs) * time.Millisecond
+		log.Printf("User %s studied for %s", v.UserID, formatDuration(duration))
+		if b.LoggingChannelID != "" {
+			message := fmt.Sprintf("<@%s> has spent %s studying!", v.UserID, formatDuration(duration))
+			_, errC := s.ChannelMessageSend(b.LoggingChannelID, message)
+			if errC != nil {
+				log.Printf("Error sending study session end message to Discord: %v", errC)
+			}
+		}
+	}
+}
+
+// registerCommands registers slash commands with Discord.
+func (b *Bot) registerCommands() {
+	log.Println("Registering commands...")
+	// Add command registration logic here using b.Session.ApplicationCommandCreate
+	// This should include the new /streak command.
+	// Example for a /streak command:
+	// _, err := b.Session.ApplicationCommandCreate(b.Session.State.User.ID, b.TestGuildID, &discordgo.ApplicationCommand{
+	// Name: "streak",
+	// Description: "Check your current study streak!",
+	// })
+	// if err != nil {
+	// log.Printf("Cannot create slash command 'streak': %v", err)
+	// }
+	log.Println("Commands registered (placeholder - implement actual registration)")
+}
+
+// SetStreakService assigns the StreakService to the bot.
+func (b *Bot) SetStreakService(ss *service.StreakService) {
+	b.streakService = ss
+}
+
+// NEW Method for /streak command
+func (b *Bot) handleSlashStreakCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	if b.streakService == nil {
+		log.Println("Error: StreakService not available for /streak command")
+		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseChannelMessageWithSource,
+			Data: &discordgo.InteractionResponseData{
+				Content: "Streak service is currently unavailable.",
+				Flags:   discordgo.MessageFlagsEphemeral,
+			},
+		})
 		return
 	}
 
-	// Check if specific voice channels are configured for tracking
-	trackSpecificChannels := len(b.allowedVoiceChannelIDs) > 0
-
-	if v.ChannelID != "" { // User is in some voice channel
-		isAllowedChannel := true // Assume allowed if not configured to restrict
-		if trackSpecificChannels {
-			_, isAllowedChannel = b.allowedVoiceChannelIDs[v.ChannelID]
-		}
-
-		if isAllowedChannel {
-			// User is in an allowed channel (or all channels are allowed)
-			b.handleUserJoinedVoice(s, v, user)
-		} else {
-			// User is in a non-allowed channel, ensure any existing session is ended
-			log.Printf("User %s (%s) joined non-tracked voice channel %s. Ending any active session.", user.Username, v.UserID, v.ChannelID)
-			b.handleUserLeftVoice(s, v, user) // Treat as if they left a tracked session context
-		}
-	} else { // User left all voice channels
-		// User left all voice channels, end their session as usual
-		b.handleUserLeftVoice(s, v, user)
+	userID := ""
+	if i.Member != nil && i.Member.User != nil {
+		userID = i.Member.User.ID
+	} else if i.User != nil { // Interaction in DMs, GuildID might be empty
+		userID = i.User.ID
 	}
+
+	if userID == "" {
+		log.Println("Error: could not determine UserID from interaction for /streak command")
+		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseChannelMessageWithSource,
+			Data: &discordgo.InteractionResponseData{
+				Content: "Error: Could not identify user.",
+				Flags:   discordgo.MessageFlagsEphemeral,
+			},
+		})
+		return
+	}
+
+	guildID := i.GuildID
+	if guildID == "" && i.User != nil { // DM context, streaks are per-guild, so this command is less meaningful in DM
+		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseChannelMessageWithSource,
+			Data: &discordgo.InteractionResponseData{
+				Content: "The /streak command is best used within a server.",
+				Flags:   discordgo.MessageFlagsEphemeral,
+			},
+		})
+		return
+	}
+
+	streakInfo, err := b.streakService.GetUserStreakInfoText(context.Background(), userID, guildID)
+	if err != nil {
+		log.Printf("Error getting streak info for user %s in guild %s: %v", userID, guildID, err)
+		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseChannelMessageWithSource,
+			Data: &discordgo.InteractionResponseData{
+				Content: "Could not retrieve your streak information at this time.",
+				Flags:   discordgo.MessageFlagsEphemeral,
+			},
+		})
+		return
+	}
+
+	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseChannelMessageWithSource,
+		Data: &discordgo.InteractionResponseData{
+			Content: streakInfo,
+			// Flags: discordgo.MessageFlagsEphemeral, // Uncomment if you want streak info to be ephemeral
+		},
+	})
 }

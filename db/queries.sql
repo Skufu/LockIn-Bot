@@ -69,3 +69,56 @@ LIMIT 10; -- For top 10 users
 -- name: DeleteOldStudySessions :exec
 DELETE FROM study_sessions
 WHERE start_time < $1; -- $1 will be the cutoff timestamp (e.g., 6 months ago)
+
+-- User Streaks Queries
+
+-- name: GetUserStreak :one
+SELECT * FROM user_streaks
+WHERE user_id = $1 AND guild_id = $2;
+
+-- name: UpsertUserStreak :one
+INSERT INTO user_streaks (
+    user_id, 
+    guild_id, 
+    current_streak_count, 
+    max_streak_count, 
+    last_activity_date, 
+    streak_extended_today, 
+    warning_notified_at,
+    updated_at
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+ON CONFLICT (user_id, guild_id) DO UPDATE SET
+    current_streak_count = EXCLUDED.current_streak_count,
+    max_streak_count = GREATEST(user_streaks.max_streak_count, EXCLUDED.max_streak_count),
+    last_activity_date = EXCLUDED.last_activity_date,
+    streak_extended_today = EXCLUDED.streak_extended_today,
+    warning_notified_at = EXCLUDED.warning_notified_at,
+    updated_at = NOW()
+RETURNING *;
+
+-- name: ResetAllStreakDailyFlags :exec
+UPDATE user_streaks
+SET streak_extended_today = FALSE, updated_at = NOW();
+
+-- name: GetStreaksToReset :many
+SELECT * FROM user_streaks
+WHERE current_streak_count > 0 
+  AND streak_extended_today = FALSE 
+  AND last_activity_date < $1; -- $1 is yesterday's date (current_date - interval '1 day')
+
+-- name: UpdateStreakWarningNotifiedAt :exec
+UPDATE user_streaks
+SET warning_notified_at = $1, updated_at = NOW()
+WHERE user_id = $2 AND guild_id = $3;
+
+-- name: GetStreaksToWarn :many
+SELECT * FROM user_streaks
+WHERE current_streak_count > 0
+  AND streak_extended_today = FALSE
+  AND (warning_notified_at IS NULL OR warning_notified_at < $1); -- $1 is (NOW() - interval '23 hours')
+
+-- name: ResetUserStreakCount :exec
+UPDATE user_streaks
+SET current_streak_count = 0, updated_at = NOW()
+WHERE user_id = $1 AND guild_id = $2;

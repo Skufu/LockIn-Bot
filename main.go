@@ -11,6 +11,7 @@ import (
 	"github.com/Skufu/LockIn-Bot/internal/bot"
 	"github.com/Skufu/LockIn-Bot/internal/config"
 	"github.com/Skufu/LockIn-Bot/internal/database"
+	"github.com/Skufu/LockIn-Bot/internal/service"
 )
 
 func main() {
@@ -43,14 +44,22 @@ func main() {
 
 	// Create and start the bot
 	log.Println("Initializing Discord bot...")
-	discordBot, err := bot.New(cfg.DiscordToken, db.Querier, cfg.LoggingChannelID, cfg.TestGuildID, cfg.AllowedVoiceChannelIDsMap)
+	discordBot, err := bot.New(cfg.DiscordToken, db.Querier, cfg, cfg.AllowedVoiceChannelIDsMap)
 	if err != nil {
 		log.Fatalf("Failed to create bot: %v", err)
 	}
 
+	// Initialize StreakService
+	log.Println("Initializing Streak Service...")
+	streakService := service.NewStreakService(db.Querier, discordBot.Session(), cfg)
+
+	// SET the StreakService on the Bot instance
+	discordBot.SetStreakService(streakService)
+
+	// Start StreakService scheduled tasks (can be after setting it on the bot)
+	streakService.StartScheduledTasks()
+
 	// Start a simple HTTP server for health checks in a goroutine
-	// This is often needed for PaaS like Render if not using a "worker" type,
-	// especially for free tiers that require a bound port.
 	go func() {
 		port := os.Getenv("PORT")
 		if port == "" {
@@ -62,21 +71,15 @@ func main() {
 
 		http.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
-			// Optionally, you could write a small status message
-			// fmt.Fprintln(w, "{\"status\": \"ok\"}")
-			// Or just an empty 200 OK is fine for health checks.
 		})
 
 		log.Printf("Health check server attempting to listen on :%s", port)
 		if err := http.ListenAndServe(":"+port, nil); err != nil {
-			// Log as fatal if the HTTP server is critical.
-			// If the bot can run without it (e.g., for local dev), perhaps just log.Error.
-			// For Render free tier, this server binding is critical for deployment.
 			log.Fatalf("Error starting health check server: %v", err)
 		}
 	}()
 
-	// Create and start the scheduler
+	// Create and start the scheduler for existing bot tasks (e.g., study session resets)
 	scheduler := bot.NewScheduler(discordBot)
 	scheduler.Start()
 
@@ -86,9 +89,10 @@ func main() {
 	signal.Notify(sc, syscall.SIGINT, syscall.SIGTERM, os.Interrupt)
 	<-sc
 
-	// Stop the scheduler and close Discord session
+	// Stop the schedulers and close Discord session
 	log.Println("Shutting down...")
 	scheduler.Stop()
+	streakService.StopScheduledTasks()
 	discordBot.Close()
 	log.Println("Shutdown complete. Goodbye!")
 }
