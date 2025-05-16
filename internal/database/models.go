@@ -33,3 +33,15 @@ type UserStat struct {
 	LastStreakDate sql.NullTime  `json:"lastStreakDate"`
 	StreakFreezes  sql.NullInt32 `json:"streakFreezes"`
 }
+
+type UserStreak struct {
+	UserID              string       `json:"userId"`
+	GuildID             string       `json:"guildId"`
+	CurrentStreakCount  int32        `json:"currentStreakCount"`
+	MaxStreakCount      int32        `json:"maxStreakCount"`
+	LastActivityDate    sql.NullTime `json:"lastActivityDate"`
+	StreakExtendedToday bool         `json:"streakExtendedToday"`
+	WarningNotifiedAt   sql.NullTime `json:"warningNotifiedAt"`
+	CreatedAt           time.Time    `json:"createdAt"`
+	UpdatedAt           time.Time    `json:"updatedAt"`
+}

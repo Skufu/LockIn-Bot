@@ -18,9 +18,12 @@ type Config struct {
 	DBName           string
 	LoggingChannelID string
 	TestGuildID      string
-	// New fields for allowed voice channels
-	AllowedVoiceChannelIDsRaw string
-	AllowedVoiceChannelIDsMap map[string]struct{}
+	// Voice channels that are tracked for activity (e.g., for streaks)
+	AllowedVoiceChannelIDsRaw string              // Keep this one for ENV loading
+	AllowedVoiceChannelIDsMap map[string]struct{} // This map will be used by services
+
+	// Fields for Streak Feature
+	StreakNotificationChannelID string
 }
 
 // Load reads configuration from .env file or environment variables
@@ -39,15 +42,16 @@ func Load() (*Config, error) {
 
 	// Use environment variables with fallbacks
 	config := &Config{
-		DiscordToken:              os.Getenv("DISCORD_TOKEN"),
-		DBHost:                    getEnvWithDefault("DB_HOST", "localhost"),
-		DBPort:                    getEnvWithDefault("DB_PORT", "5432"),
-		DBUser:                    getEnvWithDefault("DB_USER", "postgres"),
-		DBPassword:                os.Getenv("DB_PASSWORD"),
-		DBName:                    getEnvWithDefault("DB_NAME", "lockinbot"),
-		LoggingChannelID:          os.Getenv("LOGGING_CHANNEL_ID"),
-		TestGuildID:               os.Getenv("TEST_GUILD_ID"),
-		AllowedVoiceChannelIDsRaw: os.Getenv("ALLOWED_VOICE_CHANNEL_IDS"),
+		DiscordToken:                os.Getenv("DISCORD_TOKEN"),
+		DBHost:                      getEnvWithDefault("DB_HOST", "localhost"),
+		DBPort:                      getEnvWithDefault("DB_PORT", "5432"),
+		DBUser:                      getEnvWithDefault("DB_USER", "postgres"),
+		DBPassword:                  os.Getenv("DB_PASSWORD"),
+		DBName:                      getEnvWithDefault("DB_NAME", "lockinbot"),
+		LoggingChannelID:            os.Getenv("LOGGING_CHANNEL_ID"),
+		TestGuildID:                 os.Getenv("TEST_GUILD_ID"),
+		AllowedVoiceChannelIDsRaw:   os.Getenv("ALLOWED_VOICE_CHANNEL_IDS"),
+		StreakNotificationChannelID: os.Getenv("STREAK_NOTIFICATION_CHANNEL_ID"),
 	}
 
 	config.AllowedVoiceChannelIDsMap = parseChannelIDs(config.AllowedVoiceChannelIDsRaw)
@@ -61,10 +65,14 @@ func Load() (*Config, error) {
 		fmt.Println("Info: LOGGING_CHANNEL_ID environment variable is not set. Study time announcements will be disabled.")
 	}
 
+	if config.StreakNotificationChannelID == "" {
+		fmt.Println("Info: STREAK_NOTIFICATION_CHANNEL_ID environment variable is not set. Streak notifications will be disabled.")
+	}
+
 	if config.AllowedVoiceChannelIDsRaw != "" && len(config.AllowedVoiceChannelIDsMap) == 0 {
-		fmt.Printf("Info: ALLOWED_VOICE_CHANNEL_IDS was set to '%s' but resulted in no valid channel IDs. No voice channels will be specifically tracked for study time.\n", config.AllowedVoiceChannelIDsRaw)
+		fmt.Printf("Warning: ALLOWED_VOICE_CHANNEL_IDS was set to '%s' but resulted in no valid channel IDs. No voice channels will be tracked for study time or streaks.\n", config.AllowedVoiceChannelIDsRaw)
 	} else if len(config.AllowedVoiceChannelIDsMap) > 0 {
-		fmt.Printf("Info: Bot will only track study time in the following voice channels: %v\n", getKeysFromMap(config.AllowedVoiceChannelIDsMap))
+		fmt.Printf("Info: Bot will track study time and streaks in the following voice channels: %v\n", getKeysFromMap(config.AllowedVoiceChannelIDsMap))
 	}
 
 	return config, nil
