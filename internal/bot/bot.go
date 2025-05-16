@@ -719,7 +719,7 @@ func (b *Bot) handleSlashStreakCommand(s *discordgo.Session, i *discordgo.Intera
 		return
 	}
 
-	streakInfo, err := b.streakService.GetUserStreakInfoText(context.Background(), userID, guildID)
+	embed, err := b.streakService.GetUserStreakInfoEmbed(context.Background(), userID, guildID)
 	if err != nil {
 		log.Printf("Error getting streak info for user %s in guild %s: %v", userID, guildID, err)
 		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
@@ -735,7 +735,7 @@ func (b *Bot) handleSlashStreakCommand(s *discordgo.Session, i *discordgo.Intera
 	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseChannelMessageWithSource,
 		Data: &discordgo.InteractionResponseData{
-			Content: streakInfo,
+			Embeds: []*discordgo.MessageEmbed{embed},
 			// Flags: discordgo.MessageFlagsEphemeral, // Uncomment if you want streak info to be ephemeral
 		},
 	})
