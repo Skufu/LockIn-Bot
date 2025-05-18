@@ -19,22 +19,20 @@ type Querier interface {
 	EndStudySession(ctx context.Context, arg EndStudySessionParams) (StudySession, error)
 	GetActiveStudySession(ctx context.Context, userID sql.NullString) (StudySession, error)
 	GetLeaderboard(ctx context.Context) ([]GetLeaderboardRow, error)
-	GetStreaksToReset(ctx context.Context, lastActivityDate sql.NullTime) ([]UserStreak, error)
-	GetStreaksToWarn(ctx context.Context, warningNotifiedAt sql.NullTime) ([]UserStreak, error)
+	GetStreaksToReset(ctx context.Context) ([]GetStreaksToResetRow, error)
+	GetStreaksToWarn(ctx context.Context) ([]GetStreaksToWarnRow, error)
 	GetUser(ctx context.Context, userID string) (User, error)
 	GetUserStats(ctx context.Context, userID string) (UserStat, error)
 	// $1 will be the cutoff timestamp (e.g., 6 months ago)
 	// User Streaks Queries
-	GetUserStreak(ctx context.Context, arg GetUserStreakParams) (UserStreak, error)
-	ResetAllStreakDailyFlags(ctx context.Context) error
+	GetUserStreak(ctx context.Context, arg GetUserStreakParams) (GetUserStreakRow, error)
 	ResetDailyStudyTime(ctx context.Context) error
 	ResetMonthlyStudyTime(ctx context.Context) error
-	// $1 is (NOW() - interval '23 hours')
+	// Avoid re-warning too soon
 	ResetUserStreakCount(ctx context.Context, arg ResetUserStreakCountParams) error
 	ResetWeeklyStudyTime(ctx context.Context) error
-	// $1 is yesterday's date (current_date - interval '1 day')
 	UpdateStreakWarningNotifiedAt(ctx context.Context, arg UpdateStreakWarningNotifiedAtParams) error
-	UpsertUserStreak(ctx context.Context, arg UpsertUserStreakParams) (UserStreak, error)
+	UpsertUserStreak(ctx context.Context, arg UpsertUserStreakParams) (UpsertUserStreakRow, error)
 }
 
 var _ Querier = (*Queries)(nil)

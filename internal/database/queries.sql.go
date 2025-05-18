@@ -190,28 +190,46 @@ func (q *Queries) GetLeaderboard(ctx context.Context) ([]GetLeaderboardRow, erro
 }
 
 const getStreaksToReset = `-- name: GetStreaksToReset :many
-SELECT user_id, guild_id, current_streak_count, max_streak_count, last_activity_date, streak_extended_today, warning_notified_at, created_at, updated_at FROM user_streaks
+SELECT 
+    user_id, 
+    guild_id, 
+    current_streak_count, 
+    max_streak_count, 
+    last_streak_activity_timestamp, 
+    warning_notified_at,
+    created_at,
+    updated_at
+FROM user_streaks
 WHERE current_streak_count > 0 
-  AND streak_extended_today = FALSE 
-  AND last_activity_date < $1
+  AND last_streak_activity_timestamp < (NOW() - interval '24 hours')
 `
 
-func (q *Queries) GetStreaksToReset(ctx context.Context, lastActivityDate sql.NullTime) ([]UserStreak, error) {
-	rows, err := q.db.QueryContext(ctx, getStreaksToReset, lastActivityDate)
+type GetStreaksToResetRow struct {
+	UserID                      string       `json:"userId"`
+	GuildID                     string       `json:"guildId"`
+	CurrentStreakCount          int32        `json:"currentStreakCount"`
+	MaxStreakCount              int32        `json:"maxStreakCount"`
+	LastStreakActivityTimestamp sql.NullTime `json:"lastStreakActivityTimestamp"`
+	WarningNotifiedAt           sql.NullTime `json:"warningNotifiedAt"`
+	CreatedAt                   time.Time    `json:"createdAt"`
+	UpdatedAt                   time.Time    `json:"updatedAt"`
+}
+
+func (q *Queries) GetStreaksToReset(ctx context.Context) ([]GetStreaksToResetRow, error) {
+	rows, err := q.db.QueryContext(ctx, getStreaksToReset)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []UserStreak
+	var items []GetStreaksToResetRow
 	for rows.Next() {
-		var i UserStreak
+		var i GetStreaksToResetRow
 		if err := rows.Scan(
 			&i.UserID,
 			&i.GuildID,
 			&i.CurrentStreakCount,
 			&i.MaxStreakCount,
-			&i.LastActivityDate,
-			&i.StreakExtendedToday,
+			&i.LastStreakActivityTimestamp,
 			&i.WarningNotifiedAt,
 			&i.CreatedAt,
 			&i.UpdatedAt,
@@ -230,28 +248,47 @@ func (q *Queries) GetStreaksToReset(ctx context.Context, lastActivityDate sql.Nu
 }
 
 const getStreaksToWarn = `-- name: GetStreaksToWarn :many
-SELECT user_id, guild_id, current_streak_count, max_streak_count, last_activity_date, streak_extended_today, warning_notified_at, created_at, updated_at FROM user_streaks
+SELECT 
+    user_id, 
+    guild_id, 
+    current_streak_count, 
+    max_streak_count, 
+    last_streak_activity_timestamp, 
+    warning_notified_at,
+    created_at,
+    updated_at
+FROM user_streaks
 WHERE current_streak_count > 0
-  AND streak_extended_today = FALSE
-  AND (warning_notified_at IS NULL OR warning_notified_at < $1)
+  AND last_streak_activity_timestamp BETWEEN (NOW() - interval '24 hours') AND (NOW() - interval '22 hours')
+  AND (warning_notified_at IS NULL OR warning_notified_at < (NOW() - interval '23 hours'))
 `
 
-func (q *Queries) GetStreaksToWarn(ctx context.Context, warningNotifiedAt sql.NullTime) ([]UserStreak, error) {
-	rows, err := q.db.QueryContext(ctx, getStreaksToWarn, warningNotifiedAt)
+type GetStreaksToWarnRow struct {
+	UserID                      string       `json:"userId"`
+	GuildID                     string       `json:"guildId"`
+	CurrentStreakCount          int32        `json:"currentStreakCount"`
+	MaxStreakCount              int32        `json:"maxStreakCount"`
+	LastStreakActivityTimestamp sql.NullTime `json:"lastStreakActivityTimestamp"`
+	WarningNotifiedAt           sql.NullTime `json:"warningNotifiedAt"`
+	CreatedAt                   time.Time    `json:"createdAt"`
+	UpdatedAt                   time.Time    `json:"updatedAt"`
+}
+
+func (q *Queries) GetStreaksToWarn(ctx context.Context) ([]GetStreaksToWarnRow, error) {
+	rows, err := q.db.QueryContext(ctx, getStreaksToWarn)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []UserStreak
+	var items []GetStreaksToWarnRow
 	for rows.Next() {
-		var i UserStreak
+		var i GetStreaksToWarnRow
 		if err := rows.Scan(
 			&i.UserID,
 			&i.GuildID,
 			&i.CurrentStreakCount,
 			&i.MaxStreakCount,
-			&i.LastActivityDate,
-			&i.StreakExtendedToday,
+			&i.LastStreakActivityTimestamp,
 			&i.WarningNotifiedAt,
 			&i.CreatedAt,
 			&i.UpdatedAt,
@@ -306,7 +343,16 @@ func (q *Queries) GetUserStats(ctx context.Context, userID string) (UserStat, er
 const getUserStreak = `-- name: GetUserStreak :one
 
 
-SELECT user_id, guild_id, current_streak_count, max_streak_count, last_activity_date, streak_extended_today, warning_notified_at, created_at, updated_at FROM user_streaks
+SELECT 
+    user_id, 
+    guild_id, 
+    current_streak_count, 
+    max_streak_count, 
+    last_streak_activity_timestamp, 
+    warning_notified_at,
+    created_at,
+    updated_at
+FROM user_streaks
 WHERE user_id = $1 AND guild_id = $2
 `
 
@@ -315,33 +361,33 @@ type GetUserStreakParams struct {
 	GuildID string `json:"guildId"`
 }
 
+type GetUserStreakRow struct {
+	UserID                      string       `json:"userId"`
+	GuildID                     string       `json:"guildId"`
+	CurrentStreakCount          int32        `json:"currentStreakCount"`
+	MaxStreakCount              int32        `json:"maxStreakCount"`
+	LastStreakActivityTimestamp sql.NullTime `json:"lastStreakActivityTimestamp"`
+	WarningNotifiedAt           sql.NullTime `json:"warningNotifiedAt"`
+	CreatedAt                   time.Time    `json:"createdAt"`
+	UpdatedAt                   time.Time    `json:"updatedAt"`
+}
+
 // $1 will be the cutoff timestamp (e.g., 6 months ago)
 // User Streaks Queries
-func (q *Queries) GetUserStreak(ctx context.Context, arg GetUserStreakParams) (UserStreak, error) {
+func (q *Queries) GetUserStreak(ctx context.Context, arg GetUserStreakParams) (GetUserStreakRow, error) {
 	row := q.db.QueryRowContext(ctx, getUserStreak, arg.UserID, arg.GuildID)
-	var i UserStreak
+	var i GetUserStreakRow
 	err := row.Scan(
 		&i.UserID,
 		&i.GuildID,
 		&i.CurrentStreakCount,
 		&i.MaxStreakCount,
-		&i.LastActivityDate,
-		&i.StreakExtendedToday,
+		&i.LastStreakActivityTimestamp,
 		&i.WarningNotifiedAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
 	return i, err
-}
-
-const resetAllStreakDailyFlags = `-- name: ResetAllStreakDailyFlags :exec
-UPDATE user_streaks
-SET streak_extended_today = FALSE, updated_at = NOW()
-`
-
-func (q *Queries) ResetAllStreakDailyFlags(ctx context.Context) error {
-	_, err := q.db.ExecContext(ctx, resetAllStreakDailyFlags)
-	return err
 }
 
 const resetDailyStudyTime = `-- name: ResetDailyStudyTime :exec
@@ -376,7 +422,7 @@ type ResetUserStreakCountParams struct {
 	GuildID string `json:"guildId"`
 }
 
-// $1 is (NOW() - interval '23 hours')
+// Avoid re-warning too soon
 func (q *Queries) ResetUserStreakCount(ctx context.Context, arg ResetUserStreakCountParams) error {
 	_, err := q.db.ExecContext(ctx, resetUserStreakCount, arg.UserID, arg.GuildID)
 	return err
@@ -393,7 +439,6 @@ func (q *Queries) ResetWeeklyStudyTime(ctx context.Context) error {
 }
 
 const updateStreakWarningNotifiedAt = `-- name: UpdateStreakWarningNotifiedAt :exec
-
 UPDATE user_streaks
 SET warning_notified_at = $1, updated_at = NOW()
 WHERE user_id = $2 AND guild_id = $3
@@ -405,7 +450,6 @@ type UpdateStreakWarningNotifiedAtParams struct {
 	GuildID           string       `json:"guildId"`
 }
 
-// $1 is yesterday's date (current_date - interval '1 day')
 func (q *Queries) UpdateStreakWarningNotifiedAt(ctx context.Context, arg UpdateStreakWarningNotifiedAtParams) error {
 	_, err := q.db.ExecContext(ctx, updateStreakWarningNotifiedAt, arg.WarningNotifiedAt, arg.UserID, arg.GuildID)
 	return err
@@ -417,50 +461,56 @@ INSERT INTO user_streaks (
     guild_id, 
     current_streak_count, 
     max_streak_count, 
-    last_activity_date, 
-    streak_extended_today, 
+    last_streak_activity_timestamp, 
     warning_notified_at,
     updated_at
 )
-VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+VALUES ($1, $2, $3, $4, $5, $6, NOW())
 ON CONFLICT (user_id, guild_id) DO UPDATE SET
     current_streak_count = EXCLUDED.current_streak_count,
     max_streak_count = GREATEST(user_streaks.max_streak_count, EXCLUDED.max_streak_count),
-    last_activity_date = EXCLUDED.last_activity_date,
-    streak_extended_today = EXCLUDED.streak_extended_today,
+    last_streak_activity_timestamp = EXCLUDED.last_streak_activity_timestamp,
     warning_notified_at = EXCLUDED.warning_notified_at,
     updated_at = NOW()
-RETURNING user_id, guild_id, current_streak_count, max_streak_count, last_activity_date, streak_extended_today, warning_notified_at, created_at, updated_at
+RETURNING user_id, guild_id, current_streak_count, max_streak_count, last_streak_activity_timestamp, warning_notified_at, created_at, updated_at
 `
 
 type UpsertUserStreakParams struct {
-	UserID              string       `json:"userId"`
-	GuildID             string       `json:"guildId"`
-	CurrentStreakCount  int32        `json:"currentStreakCount"`
-	MaxStreakCount      int32        `json:"maxStreakCount"`
-	LastActivityDate    sql.NullTime `json:"lastActivityDate"`
-	StreakExtendedToday bool         `json:"streakExtendedToday"`
-	WarningNotifiedAt   sql.NullTime `json:"warningNotifiedAt"`
+	UserID                      string       `json:"userId"`
+	GuildID                     string       `json:"guildId"`
+	CurrentStreakCount          int32        `json:"currentStreakCount"`
+	MaxStreakCount              int32        `json:"maxStreakCount"`
+	LastStreakActivityTimestamp sql.NullTime `json:"lastStreakActivityTimestamp"`
+	WarningNotifiedAt           sql.NullTime `json:"warningNotifiedAt"`
 }
 
-func (q *Queries) UpsertUserStreak(ctx context.Context, arg UpsertUserStreakParams) (UserStreak, error) {
+type UpsertUserStreakRow struct {
+	UserID                      string       `json:"userId"`
+	GuildID                     string       `json:"guildId"`
+	CurrentStreakCount          int32        `json:"currentStreakCount"`
+	MaxStreakCount              int32        `json:"maxStreakCount"`
+	LastStreakActivityTimestamp sql.NullTime `json:"lastStreakActivityTimestamp"`
+	WarningNotifiedAt           sql.NullTime `json:"warningNotifiedAt"`
+	CreatedAt                   time.Time    `json:"createdAt"`
+	UpdatedAt                   time.Time    `json:"updatedAt"`
+}
+
+func (q *Queries) UpsertUserStreak(ctx context.Context, arg UpsertUserStreakParams) (UpsertUserStreakRow, error) {
 	row := q.db.QueryRowContext(ctx, upsertUserStreak,
 		arg.UserID,
 		arg.GuildID,
 		arg.CurrentStreakCount,
 		arg.MaxStreakCount,
-		arg.LastActivityDate,
-		arg.StreakExtendedToday,
+		arg.LastStreakActivityTimestamp,
 		arg.WarningNotifiedAt,
 	)
-	var i UserStreak
+	var i UpsertUserStreakRow
 	err := row.Scan(
 		&i.UserID,
 		&i.GuildID,
 		&i.CurrentStreakCount,
 		&i.MaxStreakCount,
-		&i.LastActivityDate,
-		&i.StreakExtendedToday,
+		&i.LastStreakActivityTimestamp,
 		&i.WarningNotifiedAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,

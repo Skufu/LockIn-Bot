@@ -490,7 +490,8 @@ func (b *Bot) handleVoiceStateUpdate(s *discordgo.Session, v *discordgo.VoiceSta
 		// The StreakService will internally check if the channel is tracked and if the user is joining.
 		go func() {
 			ctx := context.Background()
-			err := b.streakService.HandleVoiceActivity(ctx, v.UserID, v.GuildID, v.ChannelID) // v.ChannelID is the new channel, empty if leaving all
+			// Pass current UTC time as activityTime
+			err := b.streakService.HandleVoiceActivity(ctx, v.UserID, v.GuildID, v.ChannelID, time.Now().UTC())
 			if err != nil {
 				log.Printf("Error in StreakService.HandleVoiceActivity for user %s: %v", v.UserID, err)
 			}
