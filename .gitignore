@@ -1,0 +1,26 @@
+# Environment variables - DO NOT COMMIT
+.env
+
+
+
+
+# Compiled executable
+LockIn-Bot.exe
+*.exe
+LockIn-Bot
+
+# OS-specific files
+.DS_Store
+
+
+.cursor/
+user_stats.json
+user_streaks.json
+
+fix_production_user_streaks.sql
+
+*_development_neondb_*.json
+*_production_*.json
+
+*_neondb_*.json
+
