@@ -31,6 +31,13 @@ func Connect(host, port, user, password, dbname string) (*Connection, error) {
 		return nil, fmt.Errorf("failed to ping database: %w", err)
 	}
 
+	// Clear any cached prepared statements to prevent parameter binding issues
+	_, err = db.Exec("DEALLOCATE ALL")
+	if err != nil {
+		// This is usually safe to ignore on new connections
+		fmt.Printf("Warning: Failed to clear prepared statements (this is usually safe to ignore on new connections): %v\n", err)
+	}
+
 	// Configure connection pool settings for Neon
 	db.SetMaxOpenConns(25) // Limit open connections for serverless
 	db.SetMaxIdleConns(5)  // Keep some connections ready to go

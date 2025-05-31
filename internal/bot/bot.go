@@ -29,6 +29,10 @@ type Bot struct {
 	// Worker pool for handling voice events to prevent goroutine explosion
 	voiceEventChan chan func()
 	shutdownChan   chan struct{}
+
+	// Deduplication for voice events
+	lastVoiceEvent map[string]time.Time // Maps "userID:channelID:action" to last event time
+	voiceEventMu   sync.Mutex
 }
 
 // New creates a new Discord bot instance
@@ -58,6 +62,8 @@ func New(token string, db *database.Queries, appConfig *config.Config, allowedVC
 		streakService:          nil,
 		voiceEventChan:         make(chan func()),
 		shutdownChan:           make(chan struct{}),
+		lastVoiceEvent:         make(map[string]time.Time),
+		voiceEventMu:           sync.Mutex{},
 	}
 
 	// Register handlers
@@ -481,40 +487,48 @@ func formatDuration(d time.Duration) string {
 
 // handleVoiceStateUpdate is called when a user's voice state changes
 func (b *Bot) handleVoiceStateUpdate(s *discordgo.Session, v *discordgo.VoiceStateUpdate) {
-	// --- Streak Service Integration --- START
+	// Deduplication: prevent processing duplicate events within 2 seconds
+	if b.isDuplicateVoiceEvent(v) {
+		log.Printf("Skipping duplicate voice event for user %s", v.UserID)
+		return
+	}
+
+	// Check if user left a tracked voice channel - handle this synchronously first
+	userLeftTrackedChannel := (v.BeforeUpdate != nil && v.BeforeUpdate.ChannelID != "") &&
+		(v.ChannelID == "" || v.ChannelID != v.BeforeUpdate.ChannelID)
+
+	// --- Streak Service Integration --- Process voice LEAVE synchronously FIRST
+	if b.streakService != nil && userLeftTrackedChannel {
+		// Handle voice leave synchronously to ensure StreakService gets session timing
+		// before Bot clears the session data
+		ctx := context.Background()
+		err := b.streakService.HandleVoiceLeave(ctx, v.UserID, v.GuildID)
+		if err != nil {
+			log.Printf("Error in StreakService.HandleVoiceLeave for user %s: %v", v.UserID, err)
+		}
+	}
+
+	// --- Streak Service Integration --- Process voice JOIN asynchronously
 	if b.streakService != nil {
-		// Queue the task instead of spawning a new goroutine every time
-		b.voiceEventChan <- func() {
-			ctx := context.Background()
+		// Check if user joined a tracked voice channel
+		userJoinedTrackedChannel := v.ChannelID != "" &&
+			(v.BeforeUpdate == nil || v.BeforeUpdate.ChannelID != v.ChannelID)
 
-			// Check if user joined a tracked voice channel
-			userJoinedTrackedChannel := v.ChannelID != "" &&
-				(v.BeforeUpdate == nil || v.BeforeUpdate.ChannelID != v.ChannelID)
-
-			// Check if user left a tracked voice channel
-			userLeftTrackedChannel := (v.BeforeUpdate != nil && v.BeforeUpdate.ChannelID != "") &&
-				(v.ChannelID == "" || v.ChannelID != v.BeforeUpdate.ChannelID)
-
-			if userJoinedTrackedChannel {
+		if userJoinedTrackedChannel {
+			// Queue the join task asynchronously (no timing concerns for joins)
+			b.voiceEventChan <- func() {
+				ctx := context.Background()
 				err := b.streakService.HandleVoiceJoin(ctx, v.UserID, v.GuildID, v.ChannelID)
 				if err != nil {
 					log.Printf("Error in StreakService.HandleVoiceJoin for user %s: %v", v.UserID, err)
 				}
 			}
-
-			if userLeftTrackedChannel {
-				err := b.streakService.HandleVoiceLeave(ctx, v.UserID, v.GuildID)
-				if err != nil {
-					log.Printf("Error in StreakService.HandleVoiceLeave for user %s: %v", v.UserID, err)
-				}
-			}
 		}
-	} else {
+	} else if b.streakService == nil {
 		log.Println("Warning: StreakService is not initialized in Bot, skipping streak handling for VoiceStateUpdate.")
 	}
-	// --- Streak Service Integration --- END
 
-	// Existing Study Session Logic (adapted from your previous handlers.go content)
+	// Existing Study Session Logic - Bot handles database session management
 	user, err := s.User(v.UserID)
 	if err != nil {
 		log.Printf("Error getting user %s for study session logic: %v", v.UserID, err)
@@ -545,7 +559,7 @@ func (b *Bot) handleVoiceStateUpdate(s *discordgo.Session, v *discordgo.VoiceSta
 		}
 	}
 
-	// Logic for Study Sessions:
+	// Logic for Study Sessions - Bot handles this
 	if userJoinedNewChannel {
 		if newChannelIsTracked {
 			if !userWasInTrackedSession { // Started new session in a tracked channel
@@ -570,6 +584,54 @@ func (b *Bot) handleVoiceStateUpdate(s *discordgo.Session, v *discordgo.VoiceSta
 			b.handleUserLeftStudySession(s, v, user)
 		}
 	}
+}
+
+// isDuplicateVoiceEvent checks if this voice event is a duplicate within the last 2 seconds
+func (b *Bot) isDuplicateVoiceEvent(v *discordgo.VoiceStateUpdate) bool {
+	b.voiceEventMu.Lock()
+	defer b.voiceEventMu.Unlock()
+
+	now := time.Now()
+	dedupeWindow := 2 * time.Second
+
+	// Create event keys for join and leave
+	var eventKeys []string
+
+	// Check for join event
+	if v.ChannelID != "" && (v.BeforeUpdate == nil || v.BeforeUpdate.ChannelID != v.ChannelID) {
+		joinKey := fmt.Sprintf("%s:join:%s", v.UserID, v.ChannelID)
+		eventKeys = append(eventKeys, joinKey)
+	}
+
+	// Check for leave event
+	if v.BeforeUpdate != nil && v.BeforeUpdate.ChannelID != "" &&
+		(v.ChannelID == "" || v.ChannelID != v.BeforeUpdate.ChannelID) {
+		leaveKey := fmt.Sprintf("%s:leave:%s", v.UserID, v.BeforeUpdate.ChannelID)
+		eventKeys = append(eventKeys, leaveKey)
+	}
+
+	// Check if any of these events happened recently
+	for _, key := range eventKeys {
+		if lastTime, exists := b.lastVoiceEvent[key]; exists {
+			if now.Sub(lastTime) < dedupeWindow {
+				return true // Duplicate event
+			}
+		}
+	}
+
+	// Update last event times for all keys
+	for _, key := range eventKeys {
+		b.lastVoiceEvent[key] = now
+	}
+
+	// Clean up old entries (older than 10 seconds)
+	for key, eventTime := range b.lastVoiceEvent {
+		if now.Sub(eventTime) > 10*time.Second {
+			delete(b.lastVoiceEvent, key)
+		}
+	}
+
+	return false // Not a duplicate
 }
 
 // handleUserJoinedStudySession handles when a user joins a tracked voice channel
