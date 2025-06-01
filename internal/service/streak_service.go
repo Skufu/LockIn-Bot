@@ -187,16 +187,16 @@ func (s *StreakService) HandleVoiceLeave(ctx context.Context, userID, guildID st
 
 // StartScheduledTasks starts the cron jobs for daily evaluation and warnings
 func (s *StreakService) StartScheduledTasks() {
-	// Daily streak evaluation at 12:10 AM Manila time
-	_, err := s.cronScheduler.AddFunc("10 0 * * *", func() {
-		fmt.Println("StreakService: Running daily streak evaluation at 12:10 AM Manila time...")
+	// Daily streak evaluation at 11:59 PM Manila time (end of day)
+	_, err := s.cronScheduler.AddFunc("59 23 * * *", func() {
+		fmt.Println("StreakService: Running daily streak evaluation at 11:59 PM Manila time...")
 		ctx := context.Background()
 		s.EvaluateAllUserStreaks(ctx)
 	})
 	if err != nil {
 		fmt.Printf("StreakService: Failed to schedule daily evaluation: %v\n", err)
 	} else {
-		fmt.Println("StreakService: Scheduled daily evaluation at 12:10 AM Manila time")
+		fmt.Println("StreakService: Scheduled daily evaluation at 11:59 PM Manila time")
 	}
 
 	// Evening warnings at 8:00 PM Manila time
