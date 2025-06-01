@@ -224,46 +224,122 @@ func (s *StreakService) StopScheduledTasks() {
 	}
 }
 
-// EvaluateAllUserStreaks evaluates streaks for all users based on yesterday's activity
+// EvaluateAllUserStreaks evaluates streaks for all users based on today's activity
 func (s *StreakService) EvaluateAllUserStreaks(ctx context.Context) {
 	todayDate := GetTodayManilaDate()
 
-	fmt.Printf("StreakService: Running daily evaluation at %s Manila time\n", FormatManilaDate(todayDate))
+	fmt.Printf("StreakService: Running daily evaluation for %s Manila time\n", FormatManilaDate(todayDate))
 
-	// Reset all daily flags first
-	err := s.dbQueries.ResetAllStreakDailyFlags(ctx)
+	// Get ALL users who need evaluation for today (haven't been evaluated yet)
+	users, err := s.dbQueries.GetUsersForDailyEvaluation(ctx, sql.NullTime{Time: todayDate, Valid: true})
 	if err != nil {
-		fmt.Printf("StreakService: Error resetting daily flags: %v\n", err)
-		return
-	}
-	fmt.Println("StreakService: Reset all streak_incremented_today flags")
-
-	// Get users who need streak resets (inactive users)
-	users, err := s.dbQueries.GetUsersForStreakReset(ctx, sql.NullTime{Time: todayDate, Valid: true})
-	if err != nil {
-		fmt.Printf("StreakService: Error getting users for streak reset: %v\n", err)
+		fmt.Printf("StreakService: Error getting users for daily evaluation: %v\n", err)
 		return
 	}
 
-	fmt.Printf("StreakService: Found %d users who need streak resets\n", len(users))
+	fmt.Printf("StreakService: Found %d users to evaluate for today\n", len(users))
 
-	// Reset streaks for inactive users
+	// Process each user's streak based on TODAY's activity
 	for _, user := range users {
-		err = s.dbQueries.ResetUserStreakCount(ctx, database.ResetUserStreakCountParams{
-			UserID:  user.UserID,
-			GuildID: user.GuildID,
-		})
+		err = s.evaluateUserStreakForToday(ctx, user, todayDate)
 		if err != nil {
-			fmt.Printf("StreakService: Error resetting streak for user %s: %v\n", user.UserID, err)
+			fmt.Printf("StreakService: Error evaluating streak for user %s: %v\n", user.UserID, err)
 			continue
 		}
-
-		// Send streak ended notification
-		embed := s.streakEndedEmbed(user.UserID, user.CurrentStreakCount)
-		s.sendStreakEmbed(user.GuildID, embed)
-
-		fmt.Printf("StreakService: Reset streak for inactive user %s (was %d days)\n", user.UserID, user.CurrentStreakCount)
 	}
+
+	fmt.Printf("StreakService: Daily evaluation completed for %s\n", FormatManilaDate(todayDate))
+}
+
+// evaluateUserStreakForToday evaluates a single user's streak based on today's activity
+func (s *StreakService) evaluateUserStreakForToday(ctx context.Context, user database.GetUsersForDailyEvaluationRow, todayDate time.Time) error {
+	userID := user.UserID
+	guildID := user.GuildID
+
+	// Check if user has sufficient activity for TODAY
+	hasActivityToday := false
+	if user.LastActivityDate.Valid &&
+		IsSameManilaDate(user.LastActivityDate.Time, todayDate) &&
+		user.DailyActivityMinutes.Valid &&
+		user.DailyActivityMinutes.Int32 >= int32(minimumActivityMinutes) {
+		hasActivityToday = true
+	}
+
+	var newStreakCount int32
+	var notificationEmbed *discordgo.MessageEmbed
+
+	if hasActivityToday {
+		// User was active today - continue or increment streak
+		if user.CurrentStreakCount == 0 {
+			// Starting a new streak
+			newStreakCount = 1
+			notificationEmbed = s.newStreakStartedEmbed(userID, newStreakCount)
+		} else {
+			// Continuing existing streak
+			newStreakCount = user.CurrentStreakCount + 1
+			notificationEmbed = s.streakContinuedEmbed(userID, newStreakCount)
+		}
+
+		fmt.Printf("StreakService: User %s was active today (%d mins), streak: %d -> %d\n",
+			userID, user.DailyActivityMinutes.Int32, user.CurrentStreakCount, newStreakCount)
+	} else {
+		// User was NOT active today - reset streak if they had one
+		if user.CurrentStreakCount > 0 {
+			newStreakCount = 0
+			notificationEmbed = s.streakEndedEmbed(userID, user.CurrentStreakCount)
+			fmt.Printf("StreakService: User %s was inactive today, streak reset from %d to 0\n",
+				userID, user.CurrentStreakCount)
+		} else {
+			// User had no streak and was inactive - no change needed
+			fmt.Printf("StreakService: User %s remains inactive (no streak to reset)\n", userID)
+			return s.markUserEvaluated(ctx, userID, guildID, todayDate)
+		}
+	}
+
+	// Update the user's streak in database
+	newMaxStreak := user.MaxStreakCount
+	if newStreakCount > newMaxStreak {
+		newMaxStreak = newStreakCount
+	}
+
+	_, err := s.dbQueries.UpdateUserStreakAfterEvaluation(ctx, database.UpdateUserStreakAfterEvaluationParams{
+		UserID:              userID,
+		GuildID:             guildID,
+		CurrentStreakCount:  newStreakCount,
+		MaxStreakCount:      newMaxStreak,
+		StreakEvaluatedDate: sql.NullTime{Time: todayDate, Valid: true},
+	})
+	if err != nil {
+		return fmt.Errorf("failed to update streak after evaluation: %w", err)
+	}
+
+	// Send notification if we have one
+	if notificationEmbed != nil {
+		s.sendStreakEmbed(guildID, notificationEmbed)
+	}
+
+	return nil
+}
+
+// markUserEvaluated marks a user as evaluated for today without changing their streak
+func (s *StreakService) markUserEvaluated(ctx context.Context, userID, guildID string, todayDate time.Time) error {
+	// Get current streak to preserve it
+	streak, err := s.dbQueries.GetUserStreak(ctx, database.GetUserStreakParams{
+		UserID:  userID,
+		GuildID: guildID,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to get current streak: %w", err)
+	}
+
+	_, err = s.dbQueries.UpdateUserStreakAfterEvaluation(ctx, database.UpdateUserStreakAfterEvaluationParams{
+		UserID:              userID,
+		GuildID:             guildID,
+		CurrentStreakCount:  streak.CurrentStreakCount,
+		MaxStreakCount:      streak.MaxStreakCount,
+		StreakEvaluatedDate: sql.NullTime{Time: todayDate, Valid: true},
+	})
+	return err
 }
 
 // SendEveningWarnings sends warnings to users who haven't been active today
@@ -298,8 +374,6 @@ func (s *StreakService) SendEveningWarnings(ctx context.Context) {
 
 // processImmediateStreakUpdate handles immediate streak increment when user completes daily activity
 func (s *StreakService) processImmediateStreakUpdate(ctx context.Context, userID, guildID string, minutes int) error {
-	yesterdayDate := GetYesterdayManilaDate()
-
 	// Get current streak info
 	streak, err := s.dbQueries.GetUserStreak(ctx, database.GetUserStreakParams{
 		UserID:  userID,
@@ -309,23 +383,15 @@ func (s *StreakService) processImmediateStreakUpdate(ctx context.Context, userID
 		return fmt.Errorf("failed to get current streak: %w", err)
 	}
 
-	// Check if user was active yesterday
-	wasActiveYesterday := false
-	if streak.LastActivityDate.Valid &&
-		IsSameManilaDate(streak.LastActivityDate.Time, yesterdayDate) &&
-		streak.DailyActivityMinutes.Valid &&
-		streak.DailyActivityMinutes.Int32 >= minimumActivityMinutes {
-		wasActiveYesterday = true
-	}
-
-	// Calculate new streak
+	// Simple logic: just increment the streak from current value
+	// Don't check yesterday - that's handled by daily evaluation
 	var newStreak int32
-	if wasActiveYesterday {
-		// Continue or increment existing streak
-		newStreak = streak.CurrentStreakCount + 1
-	} else {
-		// Start new streak (user missed yesterday or first time)
+	if streak.CurrentStreakCount == 0 {
+		// Starting first day of streak
 		newStreak = 1
+	} else {
+		// Continuing streak (increment from current)
+		newStreak = streak.CurrentStreakCount + 1
 	}
 
 	// Update max streak if needed
