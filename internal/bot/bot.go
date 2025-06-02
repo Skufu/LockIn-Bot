@@ -121,38 +121,55 @@ func (b *Bot) endAllActiveSessions() {
 
 		duration := now.Sub(startTime)
 
-		// 1. Find the active session ID for this user
+		// Enhanced: Find ALL active sessions for this user (not just one)
+		// This handles the case where multiple sessions were created due to race conditions
+		activeDBSessions := []database.StudySession{}
+
+		// Get the primary active session
 		activeDBSession, err := b.db.GetActiveStudySession(ctx, sql.NullString{String: userID, Valid: true})
-		if err != nil {
+		if err == nil {
+			activeDBSessions = append(activeDBSessions, activeDBSession)
+		} else if err != sql.ErrNoRows {
 			log.Printf("Error getting active DB session for user %s during shutdown: %v. Session may not be ended correctly.", userID, err)
 			continue // Skip to the next user
 		}
 
-		// 2. End that specific session in the DB
-		endedSession, err := b.db.EndStudySession(ctx, database.EndStudySessionParams{
-			SessionID: activeDBSession.SessionID,
-			EndTime:   sql.NullTime{Time: now, Valid: true},
-		})
-		if err != nil {
-			log.Printf("Error ending DB study session %d for user %s during shutdown: %v. Stats may not be updated.", activeDBSession.SessionID, userID, err)
-			continue // Skip to the next user
+		// If no active session found, check if there are any unended sessions in general
+		// This is a safety measure for orphaned sessions
+		if len(activeDBSessions) == 0 {
+			log.Printf("No active DB session found for user %s, but they are in memory. This indicates a potential data inconsistency.", userID)
+			continue
 		}
 
-		log.Printf("Successfully ended DB session %d for user %s on shutdown. Duration: %d ms.", endedSession.SessionID, userID, endedSession.DurationMs.Int64)
-
-		// 3. Update user stats
-		if endedSession.DurationMs.Valid && endedSession.DurationMs.Int64 > 0 {
-			_, err = b.db.CreateOrUpdateUserStats(ctx, database.CreateOrUpdateUserStatsParams{
-				UserID:       userID,
-				TotalStudyMs: sql.NullInt64{Int64: endedSession.DurationMs.Int64, Valid: true},
+		// End all active sessions found for this user
+		var lastEndedSession database.StudySession
+		for _, session := range activeDBSessions {
+			endedSession, err := b.db.EndStudySession(ctx, database.EndStudySessionParams{
+				SessionID: session.SessionID,
+				EndTime:   sql.NullTime{Time: now, Valid: true},
 			})
 			if err != nil {
-				log.Printf("Error updating user stats for user %s during shutdown after session %d: %v", userID, endedSession.SessionID, err)
+				log.Printf("Error ending DB study session %d for user %s during shutdown: %v. Stats may not be updated.", session.SessionID, userID, err)
+				continue
+			}
+
+			log.Printf("Successfully ended DB session %d for user %s on shutdown. Duration: %d ms.", endedSession.SessionID, userID, endedSession.DurationMs.Int64)
+			lastEndedSession = endedSession
+		}
+
+		// Update user stats based on the last ended session
+		if lastEndedSession.SessionID != 0 && lastEndedSession.DurationMs.Valid && lastEndedSession.DurationMs.Int64 > 0 {
+			_, err = b.db.CreateOrUpdateUserStats(ctx, database.CreateOrUpdateUserStatsParams{
+				UserID:       userID,
+				TotalStudyMs: sql.NullInt64{Int64: lastEndedSession.DurationMs.Int64, Valid: true},
+			})
+			if err != nil {
+				log.Printf("Error updating user stats for user %s during shutdown after session %d: %v", userID, lastEndedSession.SessionID, err)
 			}
 		}
 
 		// If LoggingChannelID is set, also send a message about the shutdown-ended session
-		if b.LoggingChannelID != "" {
+		if b.LoggingChannelID != "" && lastEndedSession.SessionID != 0 {
 			username := userID                             // Default to UserID
 			discordUser, userErr := b.session.User(userID) // Attempt to get full user info
 			if userErr == nil && discordUser != nil {
@@ -161,8 +178,8 @@ func (b *Bot) endAllActiveSessions() {
 
 			// Use the duration from the ended DB session for consistency if available, otherwise fallback to in-memory calculation
 			finalDuration := duration // Fallback
-			if endedSession.DurationMs.Valid {
-				finalDuration = time.Duration(endedSession.DurationMs.Int64) * time.Millisecond
+			if lastEndedSession.DurationMs.Valid {
+				finalDuration = time.Duration(lastEndedSession.DurationMs.Int64) * time.Millisecond
 			}
 
 			message := fmt.Sprintf("<@%s> (%s) session ended due to bot shutdown after %s.", userID, username, formatDuration(finalDuration))
@@ -636,17 +653,22 @@ func (b *Bot) isDuplicateVoiceEvent(v *discordgo.VoiceStateUpdate) bool {
 
 // handleUserJoinedStudySession handles when a user joins a tracked voice channel
 func (b *Bot) handleUserJoinedStudySession(s *discordgo.Session, v *discordgo.VoiceStateUpdate, user *discordgo.User) {
-	// Add user to active sessions map
-	b.activeSessionMu.Lock()
-	startTime := time.Now()
-	b.activeSessions[user.ID] = startTime
-	b.activeSessionMu.Unlock()
-
 	ctx := context.Background()
 	now := time.Now() // Define 'now' for consistent timing
 
 	b.activeSessionMu.Lock()
 	defer b.activeSessionMu.Unlock()
+
+	// Race condition protection: Check if user already has a recent active session
+	if existingStartTime, exists := b.activeSessions[v.UserID]; exists {
+		// If the user joined very recently (within 5 seconds), this is likely a duplicate event
+		if now.Sub(existingStartTime) < 5*time.Second {
+			log.Printf("User %s already has a very recent session (started %v ago). Skipping duplicate session creation.", v.UserID, now.Sub(existingStartTime))
+			return
+		}
+		// If it's been longer than 5 seconds, this might be a legitimate new session
+		log.Printf("User %s was already in local activeSessions map. Overwriting with new session start time %v.", v.UserID, now)
+	}
 
 	// Check for and end any pre-existing active session for this user in the DB
 	existingDBSession, err := b.db.GetActiveStudySession(ctx, sql.NullString{String: v.UserID, Valid: true})
@@ -658,21 +680,17 @@ func (b *Bot) handleUserJoinedStudySession(s *discordgo.Session, v *discordgo.Vo
 		})
 		if endErr != nil {
 			log.Printf("Error auto-ending pre-existing DB session %d for user %s: %v", existingDBSession.SessionID, v.UserID, endErr)
+			return // Don't create new session if we can't clean up the old one
 		}
 	} else if err != sql.ErrNoRows { // Log unexpected errors from GetActiveStudySession
 		log.Printf("Error checking for existing active DB session for user %s: %v", v.UserID, err)
 		// For now, we'll proceed to attempt creating a new session.
 	}
 
-	// 2. Regardless of in-memory state, we are starting a new session because the user just joined a tracked VC.
-	// The previous active DB session (if any) has been ended.
-	// Update/set the in-memory tracker.
-	if _, existsInMemory := b.activeSessions[v.UserID]; existsInMemory {
-		log.Printf("User %s was already in local activeSessions map. Overwriting with new session start time %v.", v.UserID, now)
-	}
+	// Update/set the in-memory tracker BEFORE creating DB session
 	b.activeSessions[v.UserID] = now
 
-	// 3. Create DB user if they don't exist
+	// Create DB user if they don't exist
 	dbUserParams := database.CreateUserParams{UserID: v.UserID}
 	if user != nil {
 		dbUserParams.Username = sql.NullString{String: user.Username, Valid: true}
@@ -696,14 +714,15 @@ func (b *Bot) handleUserJoinedStudySession(s *discordgo.Session, v *discordgo.Vo
 		log.Printf("Error creating/updating user %s for study session (params: %+v): %v", v.UserID, dbUserParams, createErr)
 	}
 
-	// 4. Create the new study session in the DB
+	// Create the new study session in the DB
 	session, err := b.db.CreateStudySession(ctx, database.CreateStudySessionParams{
 		UserID:    sql.NullString{String: v.UserID, Valid: true},
 		StartTime: now, // Use the 'now' from the beginning of this function call
 	})
 	if err != nil {
 		log.Printf("Error creating new study session for user %s: %v", v.UserID, err)
-		// If DB creation fails, consider removing from b.activeSessions or other cleanup
+		// If DB creation fails, remove from activeSessions to maintain consistency
+		delete(b.activeSessions, v.UserID)
 	} else {
 		log.Printf("Started study session %d for user %s in VC %s at %v", session.SessionID, v.UserID, v.ChannelID, now)
 	}
