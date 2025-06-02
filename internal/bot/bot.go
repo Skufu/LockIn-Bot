@@ -710,7 +710,7 @@ func (b *Bot) handleUserJoinedStudySession(s *discordgo.Session, v *discordgo.Vo
 }
 
 // handleUserLeftStudySession handles when a user leaves a tracked voice channel
-func (b *Bot) handleUserLeftStudySession(s *discordgo.Session, v *discordgo.VoiceStateUpdate, user *discordgo.User) {
+func (b *Bot) handleUserLeftStudySession(_ *discordgo.Session, _ *discordgo.VoiceStateUpdate, user *discordgo.User) {
 	b.activeSessionMu.Lock()
 	defer b.activeSessionMu.Unlock()
 

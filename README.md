@@ -132,10 +132,18 @@ Built with **Clean Architecture** principles:
 
 The bot runs several automated tasks:
 
-- **12:10 AM Manila**: Daily streak evaluation and reset processing
+- **11:59 PM Manila**: Daily streak evaluation and flag reset processing
 - **8:00 PM Manila**: Evening activity warnings for users at risk of losing streaks
 - **Midnight UTC**: Statistics resets (daily/weekly/monthly)
 - **3:05 AM UTC**: Data pruning (removes old session records)
+
+### Streak System Details
+
+- **Minimum Activity**: 1 minute of voice channel activity per day
+- **Calendar Day Basis**: Streaks are calculated based on Manila timezone calendar days
+- **Immediate Feedback**: Users receive instant notifications when completing daily activity
+- **Double-increment Protection**: Built-in safeguards prevent streak counting errors
+- **Automatic Evaluation**: End-of-day processing ensures accurate streak maintenance
 
 ## 🤝 Contributing
 

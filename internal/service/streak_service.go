@@ -230,6 +230,14 @@ func (s *StreakService) EvaluateAllUserStreaks(ctx context.Context) {
 
 	fmt.Printf("StreakService: Running daily evaluation for %s Manila time\n", FormatManilaDate(todayDate))
 
+	// Reset all daily flags at start of evaluation
+	err := s.dbQueries.ResetAllStreakDailyFlags(ctx)
+	if err != nil {
+		fmt.Printf("StreakService: Error resetting daily flags: %v\n", err)
+		return
+	}
+	fmt.Println("StreakService: Daily flags reset successfully")
+
 	// Get ALL users who need evaluation for today (haven't been evaluated yet)
 	users, err := s.dbQueries.GetUsersForDailyEvaluation(ctx, sql.NullTime{Time: todayDate, Valid: true})
 	if err != nil {
@@ -505,16 +513,6 @@ func (s *StreakService) GetUserStreakInfoEmbed(ctx context.Context, userID, guil
 }
 
 // Embed creation methods
-func (s *StreakService) dailyActivityCompletedEmbed(userID string, minutes int) *discordgo.MessageEmbed {
-	return &discordgo.MessageEmbed{
-		Title:       "✅ Daily Activity Complete! ✅",
-		Description: fmt.Sprintf("<@%s> has completed **%d minutes** of voice activity today! Your daily streak activity is locked in! 🎯", userID, minutes),
-		Color:       0x00FF00,
-		Timestamp:   GetManilaTimeNow().Format(time.RFC3339),
-		Footer:      &discordgo.MessageEmbedFooter{Text: "Manila Time"},
-	}
-}
-
 func (s *StreakService) newStreakStartedEmbed(userID string, streakCount int32) *discordgo.MessageEmbed {
 	return &discordgo.MessageEmbed{
 		Title:       "🚀 New Streak Started! 🚀",
