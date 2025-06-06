@@ -168,18 +168,14 @@ func (s *StreakService) HandleVoiceLeave(ctx context.Context, userID, guildID st
 	fmt.Printf("StreakService: Updated daily activity for user %s in guild %s: %d total minutes\n",
 		userID, guildID, newTotalMinutes)
 
-	// If they just reached the minimum, send a notification and update streak immediately
+	// If they just reached the minimum for the first time today, send completion notification
+	// but don't increment streak - that will happen during daily evaluation
 	if currentMinutes < minimumActivityMinutes && newTotalMinutes >= minimumActivityMinutes {
-		// Check if streak was already incremented today
-		if !streak.StreakIncrementedToday {
-			err = s.processImmediateStreakUpdate(ctx, userID, guildID, newTotalMinutes)
-			if err != nil {
-				fmt.Printf("StreakService: Error processing immediate streak update for user %s: %v\n", userID, err)
-				// Still send basic completion message if streak update fails
-				embed := s.basicDailyActivityCompletedEmbed(userID, newTotalMinutes)
-				s.sendStreakEmbed(guildID, embed)
-			}
-		}
+		embed := s.basicDailyActivityCompletedEmbed(userID, newTotalMinutes)
+		s.sendStreakEmbed(guildID, embed)
+
+		fmt.Printf("StreakService: User %s completed daily activity (%d minutes). Streak will be updated during daily evaluation.\n",
+			userID, newTotalMinutes)
 	}
 
 	return nil
@@ -380,53 +376,6 @@ func (s *StreakService) SendEveningWarnings(ctx context.Context) {
 	}
 }
 
-// processImmediateStreakUpdate handles immediate streak increment when user completes daily activity
-func (s *StreakService) processImmediateStreakUpdate(ctx context.Context, userID, guildID string, minutes int) error {
-	// Get current streak info
-	streak, err := s.dbQueries.GetUserStreak(ctx, database.GetUserStreakParams{
-		UserID:  userID,
-		GuildID: guildID,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to get current streak: %w", err)
-	}
-
-	// Simple logic: just increment the streak from current value
-	// Don't check yesterday - that's handled by daily evaluation
-	var newStreak int32
-	if streak.CurrentStreakCount == 0 {
-		// Starting first day of streak
-		newStreak = 1
-	} else {
-		// Continuing streak (increment from current)
-		newStreak = streak.CurrentStreakCount + 1
-	}
-
-	// Update max streak if needed
-	newMaxStreak := streak.MaxStreakCount
-	if newStreak > newMaxStreak {
-		newMaxStreak = newStreak
-	}
-
-	// Update streak immediately
-	err = s.dbQueries.UpdateStreakImmediately(ctx, database.UpdateStreakImmediatelyParams{
-		UserID:             userID,
-		GuildID:            guildID,
-		CurrentStreakCount: newStreak,
-		MaxStreakCount:     newMaxStreak,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to update streak immediately: %w", err)
-	}
-
-	// Send completion message with streak count
-	embed := s.dailyActivityCompletedWithStreakEmbed(userID, minutes, newStreak)
-	s.sendStreakEmbed(guildID, embed)
-
-	fmt.Printf("StreakService: User %s completed daily activity and streak updated to %d days\n", userID, newStreak)
-	return nil
-}
-
 // GetUserStreakInfoEmbed returns an embed with the user's current streak information
 func (s *StreakService) GetUserStreakInfoEmbed(ctx context.Context, userID, guildID string) (*discordgo.MessageEmbed, error) {
 	streak, err := s.dbQueries.GetUserStreak(ctx, database.GetUserStreakParams{
@@ -547,7 +496,7 @@ func (s *StreakService) streakContinuedEmbed(userID string, streakCount int32) *
 
 	return &discordgo.MessageEmbed{
 		Title:       fmt.Sprintf("%s Day %d Complete! %s", milestoneEmoji, streakCount, milestoneEmoji),
-		Description: fmt.Sprintf("<@%s> is now on a **%d day** study streak!%s Keep the momentum going! 🚀", userID, streakCount, milestoneMsg),
+		Description: fmt.Sprintf("<@%s> is now on a **%d day** study streak! Keep the momentum going!%s 🚀", userID, streakCount, milestoneMsg),
 		Color:       0x00AAFF,
 		Timestamp:   GetManilaTimeNow().Format(time.RFC3339),
 		Footer:      &discordgo.MessageEmbedFooter{Text: "Manila Time"},
@@ -574,22 +523,11 @@ func (s *StreakService) streakEndedEmbed(userID string, lastStreakCount int32) *
 	}
 }
 
-// dailyActivityCompletedWithStreakEmbed creates completion message with streak count (new format)
-func (s *StreakService) dailyActivityCompletedWithStreakEmbed(userID string, minutes int, streakCount int32) *discordgo.MessageEmbed {
-	return &discordgo.MessageEmbed{
-		Title:       "🎉 Daily Activity Complete! 🎉",
-		Description: fmt.Sprintf("<@%s> has completed **%d minutes** today! Now on a **%d-day** locking in streak! 🔥", userID, minutes, streakCount),
-		Color:       0x00FF00,
-		Timestamp:   GetManilaTimeNow().Format(time.RFC3339),
-		Footer:      &discordgo.MessageEmbedFooter{Text: "Manila Time"},
-	}
-}
-
 // basicDailyActivityCompletedEmbed creates basic completion message (fallback)
 func (s *StreakService) basicDailyActivityCompletedEmbed(userID string, minutes int) *discordgo.MessageEmbed {
 	return &discordgo.MessageEmbed{
 		Title:       "✅ Daily Activity Complete! ✅",
-		Description: fmt.Sprintf("<@%s> has completed **%d minutes** of voice activity today! 🎯", userID, minutes),
+		Description: fmt.Sprintf("<@%s> has completed **%d minutes** of voice activity today! 🎯\n\nYour streak will be updated during the daily evaluation at midnight Manila time.", userID, minutes),
 		Color:       0x00FF00,
 		Timestamp:   GetManilaTimeNow().Format(time.RFC3339),
 		Footer:      &discordgo.MessageEmbedFooter{Text: "Manila Time"},
