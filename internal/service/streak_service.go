@@ -131,28 +131,88 @@ func (s *StreakService) HandleVoiceLeave(ctx context.Context, userID, guildID st
 		return nil // Too short to count
 	}
 
+	todayDate := GetTodayManilaDate()
+
 	// Get current activity for today to determine if we need to process anything
 	streak, err := s.dbQueries.GetUserStreak(ctx, database.GetUserStreakParams{
 		UserID:  userID,
 		GuildID: guildID,
 	})
 	if err != nil {
-		// If user doesn't exist in streaks table, that's fine - they haven't started streaking yet
 		if err == sql.ErrNoRows {
+			// User doesn't exist in streaks table - create initial record and track activity
+			fmt.Printf("StreakService: User %s not in streak system, creating initial record\n", userID)
+			_, err = s.dbQueries.StartDailyActivity(ctx, database.StartDailyActivityParams{
+				UserID:            userID,
+				GuildID:           guildID,
+				LastActivityDate:  sql.NullTime{Time: todayDate, Valid: true},
+				ActivityStartTime: sql.NullTime{Time: startTime, Valid: true},
+			})
+			if err != nil {
+				return fmt.Errorf("failed to create initial activity record: %w", err)
+			}
+
+			// Update with the session minutes
+			err = s.dbQueries.UpdateDailyActivityMinutes(ctx, database.UpdateDailyActivityMinutesParams{
+				UserID:               userID,
+				GuildID:              guildID,
+				DailyActivityMinutes: sql.NullInt32{Int32: int32(sessionMinutes), Valid: true},
+			})
+			if err != nil {
+				return fmt.Errorf("failed to update new user activity minutes: %w", err)
+			}
+
+			// Send completion notification if they reached minimum
+			if sessionMinutes >= minimumActivityMinutes {
+				embed := s.basicDailyActivityCompletedEmbed(userID, sessionMinutes)
+				s.sendStreakEmbed(guildID, embed)
+			}
+
+			fmt.Printf("StreakService: New user %s recorded %d minutes of activity\n", userID, sessionMinutes)
 			return nil
 		}
 		return fmt.Errorf("failed to get user streak: %w", err)
 	}
 
-	todayDate := GetTodayManilaDate()
 	currentMinutes := int(streak.DailyActivityMinutes.Int32)
 
-	// Only process if this is today's activity date
-	if !streak.LastActivityDate.Valid ||
-		!IsSameManilaDate(streak.LastActivityDate.Time, todayDate) {
+	// Handle cross-day sessions: if this is a different day, start fresh tracking
+	if !streak.LastActivityDate.Valid || !IsSameManilaDate(streak.LastActivityDate.Time, todayDate) {
+		fmt.Printf("StreakService: Cross-day session detected for user %s, starting fresh tracking for %s\n",
+			userID, FormatManilaDate(todayDate))
+
+		// Start new day tracking
+		_, err = s.dbQueries.StartDailyActivity(ctx, database.StartDailyActivityParams{
+			UserID:            userID,
+			GuildID:           guildID,
+			LastActivityDate:  sql.NullTime{Time: todayDate, Valid: true},
+			ActivityStartTime: sql.NullTime{Time: startTime, Valid: true},
+		})
+		if err != nil {
+			return fmt.Errorf("failed to start new day activity tracking: %w", err)
+		}
+
+		// Update with session minutes
+		err = s.dbQueries.UpdateDailyActivityMinutes(ctx, database.UpdateDailyActivityMinutesParams{
+			UserID:               userID,
+			GuildID:              guildID,
+			DailyActivityMinutes: sql.NullInt32{Int32: int32(sessionMinutes), Valid: true},
+		})
+		if err != nil {
+			return fmt.Errorf("failed to update cross-day activity minutes: %w", err)
+		}
+
+		// Send completion notification if they reached minimum
+		if sessionMinutes >= minimumActivityMinutes {
+			embed := s.basicDailyActivityCompletedEmbed(userID, sessionMinutes)
+			s.sendStreakEmbed(guildID, embed)
+		}
+
+		fmt.Printf("StreakService: Cross-day session for user %s recorded %d minutes\n", userID, sessionMinutes)
 		return nil
 	}
 
+	// Normal case: same day activity
 	newTotalMinutes := currentMinutes + sessionMinutes
 
 	// Update the daily activity minutes
