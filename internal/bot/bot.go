@@ -83,6 +83,9 @@ func New(token string, db *database.Queries, appConfig *config.Config, allowedVC
 	// Start worker pool for voice events (prevents goroutine explosion)
 	go bot.voiceEventWorker()
 
+	// Start session timeout checker to prevent phantom sessions
+	bot.StartSessionTimeoutChecker()
+
 	return bot, nil
 }
 
