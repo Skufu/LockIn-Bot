@@ -608,27 +608,31 @@ func (b *Bot) handleVoiceStateUpdate(s *discordgo.Session, v *discordgo.VoiceSta
 	}
 }
 
-// isDuplicateVoiceEvent checks if this voice event is a duplicate within the last 2 seconds
+// isDuplicateVoiceEvent checks if this voice event is a duplicate within the last 3 seconds
 func (b *Bot) isDuplicateVoiceEvent(v *discordgo.VoiceStateUpdate) bool {
 	b.voiceEventMu.Lock()
 	defer b.voiceEventMu.Unlock()
 
 	now := time.Now()
-	dedupeWindow := 2 * time.Second
+	dedupeWindow := 3 * time.Second // Increased from 2 to 3 seconds
 
-	// Create event keys for join and leave
+	// Create more specific event keys for better deduplication
 	var eventKeys []string
 
 	// Check for join event
 	if v.ChannelID != "" && (v.BeforeUpdate == nil || v.BeforeUpdate.ChannelID != v.ChannelID) {
-		joinKey := fmt.Sprintf("%s:join:%s", v.UserID, v.ChannelID)
+		joinKey := fmt.Sprintf("%s:join:%s:%s", v.UserID, v.ChannelID, v.GuildID)
 		eventKeys = append(eventKeys, joinKey)
+
+		// Also add a general join key to prevent rapid join-leave-join sequences
+		generalJoinKey := fmt.Sprintf("%s:anyjoin:%s", v.UserID, v.GuildID)
+		eventKeys = append(eventKeys, generalJoinKey)
 	}
 
 	// Check for leave event
 	if v.BeforeUpdate != nil && v.BeforeUpdate.ChannelID != "" &&
 		(v.ChannelID == "" || v.ChannelID != v.BeforeUpdate.ChannelID) {
-		leaveKey := fmt.Sprintf("%s:leave:%s", v.UserID, v.BeforeUpdate.ChannelID)
+		leaveKey := fmt.Sprintf("%s:leave:%s:%s", v.UserID, v.BeforeUpdate.ChannelID, v.GuildID)
 		eventKeys = append(eventKeys, leaveKey)
 	}
 
@@ -636,6 +640,8 @@ func (b *Bot) isDuplicateVoiceEvent(v *discordgo.VoiceStateUpdate) bool {
 	for _, key := range eventKeys {
 		if lastTime, exists := b.lastVoiceEvent[key]; exists {
 			if now.Sub(lastTime) < dedupeWindow {
+				log.Printf("Duplicate voice event detected for key: %s (last: %v, now: %v, diff: %v)",
+					key, lastTime, now, now.Sub(lastTime))
 				return true // Duplicate event
 			}
 		}
@@ -646,9 +652,10 @@ func (b *Bot) isDuplicateVoiceEvent(v *discordgo.VoiceStateUpdate) bool {
 		b.lastVoiceEvent[key] = now
 	}
 
-	// Clean up old entries (older than 10 seconds)
+	// Clean up old entries (older than 15 seconds)
+	cleanupThreshold := 15 * time.Second
 	for key, eventTime := range b.lastVoiceEvent {
-		if now.Sub(eventTime) > 10*time.Second {
+		if now.Sub(eventTime) > cleanupThreshold {
 			delete(b.lastVoiceEvent, key)
 		}
 	}
@@ -664,15 +671,16 @@ func (b *Bot) handleUserJoinedStudySession(s *discordgo.Session, v *discordgo.Vo
 	b.activeSessionMu.Lock()
 	defer b.activeSessionMu.Unlock()
 
-	// Race condition protection: Check if user already has a recent active session
+	// Enhanced race condition protection: Check if user already has a recent active session
 	if existingStartTime, exists := b.activeSessions[v.UserID]; exists {
-		// If the user joined very recently (within 5 seconds), this is likely a duplicate event
-		if now.Sub(existingStartTime) < 5*time.Second {
-			log.Printf("User %s already has a very recent session (started %v ago). Skipping duplicate session creation.", v.UserID, now.Sub(existingStartTime))
+		timeSinceStart := now.Sub(existingStartTime)
+		// If the user joined very recently (within 10 seconds), this is likely a duplicate event
+		if timeSinceStart < 10*time.Second {
+			log.Printf("User %s already has a very recent session (started %v ago). Skipping duplicate session creation.", v.UserID, timeSinceStart)
 			return
 		}
-		// If it's been longer than 5 seconds, this might be a legitimate new session
-		log.Printf("User %s was already in local activeSessions map. Overwriting with new session start time %v.", v.UserID, now)
+		// If it's been longer than 10 seconds, this might be a legitimate new session
+		log.Printf("User %s was already in local activeSessions map for %v. This might be a legitimate channel switch. Proceeding with session update.", v.UserID, timeSinceStart)
 	}
 
 	// Check for and end any pre-existing active session for this user in the DB
@@ -752,7 +760,11 @@ func (b *Bot) handleUserLeftStudySession(_ *discordgo.Session, _ *discordgo.Voic
 	ctx := context.Background()
 	activeDBSession, err := b.db.GetActiveStudySession(ctx, sql.NullString{String: user.ID, Valid: true})
 	if err != nil {
-		log.Printf("Error getting active DB session for user %s: %v", user.ID, err)
+		if err == sql.ErrNoRows {
+			log.Printf("No active DB session found for user %s when ending session. This is likely a race condition or duplicate event.", user.ID)
+		} else {
+			log.Printf("Error getting active DB session for user %s: %v", user.ID, err)
+		}
 		// Still attempt to remove from in-memory map
 		delete(b.activeSessions, user.ID)
 		return

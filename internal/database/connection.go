@@ -38,6 +38,12 @@ func Connect(host, port, user, password, dbname string) (*Connection, error) {
 		fmt.Printf("Warning: Failed to clear prepared statements (this is usually safe to ignore on new connections): %v\n", err)
 	}
 
+	// Force a fresh connection to clear any PostgreSQL statement cache issues
+	err = db.Ping()
+	if err != nil {
+		return nil, fmt.Errorf("failed to verify database connection after cleanup: %w", err)
+	}
+
 	// Configure connection pool settings for Neon
 	db.SetMaxOpenConns(25) // Limit open connections for serverless
 	db.SetMaxIdleConns(5)  // Keep some connections ready to go

@@ -24,3 +24,7 @@ fix_production_user_streaks.sql
 
 *_neondb_*.json
 
+
+docs/
+
+

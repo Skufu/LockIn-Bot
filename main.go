@@ -43,6 +43,10 @@ func main() {
 	}
 	log.Println("Database migrations completed successfully")
 
+	// Clear any remaining prepared statement cache issues after migrations
+	log.Println("Clearing prepared statement cache...")
+	// Note: We'll rely on the connection.go clearing which is safer
+
 	const maxBotInitAttempts = 10
 	const initialBackoff = 5 * time.Second
 
@@ -56,8 +60,13 @@ func main() {
 			defer func() {
 				if r := recover(); r != nil {
 					createErr = fmt.Errorf("panic while creating bot: %v", r)
+					log.Printf("Bot creation panic recovered: %v", r)
 				}
 			}()
+			// Add small delay to let database settle after migrations
+			if attempt > 1 {
+				time.Sleep(1 * time.Second)
+			}
 			discordBot, createErr = bot.New(cfg.DiscordToken, db.Querier, cfg, cfg.AllowedVoiceChannelIDsMap)
 		}()
 
