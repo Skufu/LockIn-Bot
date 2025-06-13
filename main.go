@@ -49,6 +49,9 @@ func main() {
 		log.Fatalf("Failed to create bot: %v", err)
 	}
 
+	// Start connection monitoring (but don't auto-shutdown on token errors)
+	discordBot.MonitorConnection()
+
 	// Initialize StreakService
 	log.Println("Initializing Streak Service...")
 	streakService := service.NewStreakService(db.Querier, discordBot.Session(), cfg)
@@ -91,7 +94,8 @@ func main() {
 		log.Printf("Health check endpoints available: /healthz, /health, /")
 
 		if err := http.ListenAndServe(":"+port, nil); err != nil {
-			log.Fatalf("Error starting health check server: %v", err)
+			log.Printf("Warning: Health check server failed to start: %v", err)
+			log.Println("Bot will continue running without health check server")
 		}
 	}()
 
@@ -103,9 +107,10 @@ func main() {
 	log.Println("Bot is now running. Press CTRL-C to exit.")
 	sc := make(chan os.Signal, 1)
 	signal.Notify(sc, syscall.SIGINT, syscall.SIGTERM, os.Interrupt)
-	<-sc
+	receivedSignal := <-sc
 
-	// Stop the schedulers and close Discord session
+	// Log what signal caused the shutdown
+	log.Printf("Received signal: %v", receivedSignal)
 	log.Println("Shutting down...")
 	scheduler.Stop()
 	streakService.StopScheduledTasks()

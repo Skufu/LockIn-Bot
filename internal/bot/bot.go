@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -995,8 +994,7 @@ func (b *Bot) handleTokenExpiration() {
 		}
 	}
 
-	// Graceful shutdown since we can't continue with expired token
-	log.Printf("Initiating graceful shutdown due to token expiration...")
-	b.Close()
-	os.Exit(1) // Exit with error code to signal restart needed
+	// Log the issue but don't automatically shutdown - let the main process decide
+	log.Printf("⚠️  Token expired but continuing to run for manual intervention")
+	log.Printf("⚠️  Bot functionality will be limited until token is renewed")
 }
