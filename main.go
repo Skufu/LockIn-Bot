@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -43,48 +42,11 @@ func main() {
 	}
 	log.Println("Database migrations completed successfully")
 
-	// Clear any remaining prepared statement cache issues after migrations
-	log.Println("Clearing prepared statement cache...")
-	// Note: We'll rely on the connection.go clearing which is safer
-
-	const maxBotInitAttempts = 10
-	const initialBackoff = 5 * time.Second
-
-	var discordBot *bot.Bot
-	for attempt := 1; attempt <= maxBotInitAttempts; attempt++ {
-		log.Printf("Initializing Discord bot (attempt %d/%d)...", attempt, maxBotInitAttempts)
-
-		var createErr error
-		// Wrap in func to enable defer recover per attempt
-		func() {
-			defer func() {
-				if r := recover(); r != nil {
-					createErr = fmt.Errorf("panic while creating bot: %v", r)
-					log.Printf("Bot creation panic recovered: %v", r)
-				}
-			}()
-			// Add small delay to let database settle after migrations
-			if attempt > 1 {
-				time.Sleep(1 * time.Second)
-			}
-			discordBot, createErr = bot.New(cfg.DiscordToken, db.Querier, cfg, cfg.AllowedVoiceChannelIDsMap)
-		}()
-
-		if createErr == nil {
-			log.Printf("Discord bot initialized successfully on attempt %d", attempt)
-			break
-		}
-
-		// If not last attempt, backoff and retry
-		if attempt < maxBotInitAttempts {
-			wait := time.Duration(attempt*attempt) * initialBackoff
-			log.Printf("Failed to initialize bot (attempt %d/%d): %v. Retrying in %s...", attempt, maxBotInitAttempts, createErr, wait)
-			time.Sleep(wait)
-			continue
-		}
-
-		// Out of attempts -> fatal
-		log.Fatalf("Failed to create bot after %d attempts: %v", maxBotInitAttempts, createErr)
+	// Create and start the bot
+	log.Println("Initializing Discord bot...")
+	discordBot, err := bot.New(cfg.DiscordToken, db.Querier, cfg, cfg.AllowedVoiceChannelIDsMap)
+	if err != nil {
+		log.Fatalf("Failed to create bot: %v", err)
 	}
 
 	// Initialize StreakService
