@@ -70,6 +70,20 @@ LIMIT 10; -- For top 10 users
 DELETE FROM study_sessions
 WHERE start_time < $1; -- $1 will be the cutoff timestamp (e.g., 6 months ago)
 
+-- name: DeleteAllStudySessions :exec
+DELETE FROM study_sessions;
+
+-- name: CountStudySessions :one
+SELECT COUNT(*) FROM study_sessions;
+
+-- name: DeleteOldStudySessionsWithCount :one
+WITH deleted AS (
+    DELETE FROM study_sessions
+    WHERE start_time < $1
+    RETURNING session_id
+)
+SELECT COUNT(*) FROM deleted;
+
 -- Calendar Day-Based User Streaks Queries
 
 -- name: GetUserStreak :one

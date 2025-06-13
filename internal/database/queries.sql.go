@@ -11,6 +11,17 @@ import (
 	"time"
 )
 
+const countStudySessions = `-- name: CountStudySessions :one
+SELECT COUNT(*) FROM study_sessions
+`
+
+func (q *Queries) CountStudySessions(ctx context.Context) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countStudySessions)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const createOrUpdateUserStats = `-- name: CreateOrUpdateUserStats :one
 INSERT INTO user_stats (user_id, total_study_ms, daily_study_ms, weekly_study_ms, monthly_study_ms)
 VALUES ($1, $2, $2, $2, $2)
@@ -88,6 +99,17 @@ func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) (User, e
 	return i, err
 }
 
+const deleteAllStudySessions = `-- name: DeleteAllStudySessions :exec
+
+DELETE FROM study_sessions
+`
+
+// $1 will be the cutoff timestamp (e.g., 6 months ago)
+func (q *Queries) DeleteAllStudySessions(ctx context.Context) error {
+	_, err := q.db.ExecContext(ctx, deleteAllStudySessions)
+	return err
+}
+
 const deleteOldStudySessions = `-- name: DeleteOldStudySessions :exec
 
 DELETE FROM study_sessions
@@ -98,6 +120,22 @@ WHERE start_time < $1
 func (q *Queries) DeleteOldStudySessions(ctx context.Context, startTime time.Time) error {
 	_, err := q.db.ExecContext(ctx, deleteOldStudySessions, startTime)
 	return err
+}
+
+const deleteOldStudySessionsWithCount = `-- name: DeleteOldStudySessionsWithCount :one
+WITH deleted AS (
+    DELETE FROM study_sessions
+    WHERE start_time < $1
+    RETURNING session_id
+)
+SELECT COUNT(*) FROM deleted
+`
+
+func (q *Queries) DeleteOldStudySessionsWithCount(ctx context.Context, startTime time.Time) (int64, error) {
+	row := q.db.QueryRowContext(ctx, deleteOldStudySessionsWithCount, startTime)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
 }
 
 const endStudySession = `-- name: EndStudySession :one
@@ -225,7 +263,6 @@ func (q *Queries) GetUserStats(ctx context.Context, userID string) (UserStat, er
 
 const getUserStreak = `-- name: GetUserStreak :one
 
-
 SELECT
     user_id,
     guild_id,
@@ -263,7 +300,6 @@ type GetUserStreakRow struct {
 	UpdatedAt              time.Time     `json:"updatedAt"`
 }
 
-// $1 will be the cutoff timestamp (e.g., 6 months ago)
 // Calendar Day-Based User Streaks Queries
 func (q *Queries) GetUserStreak(ctx context.Context, arg GetUserStreakParams) (GetUserStreakRow, error) {
 	row := q.db.QueryRowContext(ctx, getUserStreak, arg.UserID, arg.GuildID)

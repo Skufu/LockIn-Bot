@@ -16,6 +16,7 @@ A Discord bot for gamifying studying through automatic voice channel tracking, s
 - ⏰ **Automated Notifications**: Evening warnings and streak celebrations
 - 📈 **Historical Data**: Long-term study session tracking and analytics
 - 🌏 **Timezone Aware**: Built-in Manila timezone handling for consistent streak calculations
+- 🚨 **Health Monitoring**: Built-in Discord token monitoring and alerts
 
 ## 🚀 Quick Start
 
@@ -192,6 +193,62 @@ If you encounter any issues or have questions:
 1. Check the [Issues](https://github.com/Skufu/LockIn-Bot/issues) page
 2. Create a new issue if your problem isn't already reported
 3. Provide as much detail as possible including logs and configuration
+
+## Discord Token Management
+
+### When Your Token Expires
+
+Discord bot tokens can expire or become invalid when:
+- Token is manually regenerated in Discord Developer Portal
+- Discord detects security issues and force-regenerates
+- Token is manually revoked
+
+### Automatic Detection & Alerts
+
+LockIn-Bot includes built-in token monitoring that:
+- ✅ Checks Discord connection health every 30 seconds
+- 🚨 Detects token expiration automatically
+- 📢 Sends alerts to your logging channel
+- 📋 Provides clear instructions in logs
+- 🔄 Gracefully shuts down for restart
+
+### What To Do When Token Expires
+
+**The bot will automatically detect expiration and show these instructions:**
+
+1. **Go to Discord Developer Portal:** https://discord.com/developers/applications
+2. **Select your bot application**
+3. **Navigate to 'Bot' section**
+4. **Click 'Reset Token'** to generate a new token
+5. **Copy the new token**
+6. **Update your environment variables:**
+   ```bash
+   # In your .env file or deployment environment
+   DISCORD_TOKEN=your_new_token_here
+   ```
+7. **Restart the bot service:**
+   ```bash
+   # If using Docker/Render
+   # The service will restart automatically due to exit code
+   
+   # If running locally
+   go run main.go
+   ```
+
+### Preventive Measures
+
+- **Monitor Logs:** Watch for "🚨 CRITICAL" alerts
+- **Set Up Notifications:** Configure alerts for your logging channel
+- **Document Token Location:** Keep track of where tokens are stored
+- **Backup Plan:** Have deployment restart procedures ready
+
+### Token Security Best Practices
+
+- ✅ Store tokens in environment variables, never in code
+- ✅ Use `.env` files for local development  
+- ✅ Keep tokens secure in production environments
+- ❌ Never commit tokens to version control
+- ❌ Don't share tokens in messages or public channels
 
 ---
 

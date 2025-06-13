@@ -11,17 +11,20 @@ import (
 )
 
 type Querier interface {
+	CountStudySessions(ctx context.Context) (int64, error)
 	CreateOrUpdateUserStats(ctx context.Context, arg CreateOrUpdateUserStatsParams) (UserStat, error)
 	CreateStudySession(ctx context.Context, arg CreateStudySessionParams) (StudySession, error)
 	CreateUser(ctx context.Context, arg CreateUserParams) (User, error)
+	// $1 will be the cutoff timestamp (e.g., 6 months ago)
+	DeleteAllStudySessions(ctx context.Context) error
 	// For top 10 users
 	DeleteOldStudySessions(ctx context.Context, startTime time.Time) error
+	DeleteOldStudySessionsWithCount(ctx context.Context, startTime time.Time) (int64, error)
 	EndStudySession(ctx context.Context, arg EndStudySessionParams) (StudySession, error)
 	GetActiveStudySession(ctx context.Context, userID sql.NullString) (StudySession, error)
 	GetLeaderboard(ctx context.Context) ([]GetLeaderboardRow, error)
 	GetUser(ctx context.Context, userID string) (User, error)
 	GetUserStats(ctx context.Context, userID string) (UserStat, error)
-	// $1 will be the cutoff timestamp (e.g., 6 months ago)
 	// Calendar Day-Based User Streaks Queries
 	GetUserStreak(ctx context.Context, arg GetUserStreakParams) (GetUserStreakRow, error)
 	GetUsersForDailyEvaluation(ctx context.Context, streakEvaluatedDate sql.NullTime) ([]GetUsersForDailyEvaluationRow, error)
