@@ -517,7 +517,7 @@ func (b *Bot) handleSlashLeaderboardCommand(s *discordgo.Session, i *discordgo.I
 			}
 		}
 
-		if userRank > 0 {
+		if userRank > 0 && b.achievementService != nil {
 			// Check competition achievements
 			go b.achievementService.CheckCompetitionAchievements(ctx, userID, guildID, userRank)
 			go b.achievementService.CheckUndefeated(ctx, userID, guildID, userRank)

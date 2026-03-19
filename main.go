@@ -55,6 +55,14 @@ func main() {
 	log.Println("Initializing Discord bot with retry logic...")
 	log.Printf("Discord connection retry enabled: max %d attempts, exponential backoff", maxRetries)
 
+	// Log token diagnostics (masked) to help debug configuration issues on deploy
+	tokenLen := len(cfg.DiscordToken)
+	tokenPreview := cfg.DiscordToken
+	if tokenLen > 8 {
+		tokenPreview = cfg.DiscordToken[:8]
+	}
+	log.Printf("Token diagnostics: length=%d, prefix=%s...", tokenLen, tokenPreview)
+
 	discordBot, err := bot.ConnectWithRetry(cfg.DiscordToken, db.Querier, cfg, cfg.AllowedVoiceChannelIDsMap, maxRetries)
 	if err != nil {
 		// Check if it's a permanent error vs all retries exhausted

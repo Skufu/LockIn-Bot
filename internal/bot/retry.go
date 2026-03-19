@@ -57,6 +57,9 @@ func connectWithRetry(token string, db *database.Queries, cfg *config.Config, al
 			continue
 		}
 
+		// Set intents BEFORE opening the connection (critical: discordgo needs these for the gateway handshake)
+		dg.Identify.Intents = discordgo.IntentsGuildVoiceStates | discordgo.IntentsGuildMessages | discordgo.IntentsMessageContent
+
 		// Attempt to open the session connection
 		err = dg.Open()
 		if err != nil {
@@ -107,9 +110,6 @@ func connectWithRetry(token string, db *database.Queries, cfg *config.Config, al
 		dg.AddHandler(bot.handleReady)
 		dg.AddHandler(bot.handleVoiceStateUpdate)
 		dg.AddHandler(bot.handleInteractionCreate)
-
-		// Set intents
-		dg.Identify.Intents = discordgo.IntentsGuildVoiceStates | discordgo.IntentsGuildMessages | discordgo.IntentsMessageContent
 
 		// Start worker pool for voice events (prevents goroutine explosion)
 		go bot.voiceEventWorker()
