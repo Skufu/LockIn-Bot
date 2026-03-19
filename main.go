@@ -135,16 +135,17 @@ func main() {
 	log.Println("Shutdown complete. Goodbye!")
 }
 
-// startHealthCheckServer starts the HTTP health check server immediately
-// so Render sees a bound port and doesn't kill the process during Discord connection retries.
+// startHealthCheckServer starts the HTTP health check server
+// If PORT is set (Web Service), it binds to the port to satisfy Render.
+// If PORT is not set (Background Worker), it gracefully skips starting the server.
 func startHealthCheckServer() {
 	port := os.Getenv("PORT")
 	if port == "" {
-		port = "8000"
-		log.Printf("Defaulting to port %s for health check server (PORT env var not set)", port)
-	} else {
-		log.Printf("Starting health check server on port %s (from PORT env var)", port)
+		log.Println("PORT environment variable not set. Skipping health check server (running as Background Worker).")
+		return
 	}
+	
+	log.Printf("Starting health check server on port %s (from PORT env var)", port)
 
 	mux := http.NewServeMux()
 
