@@ -27,6 +27,8 @@ type StreakService struct {
 	bot interface { // Interface to access Bot's session timing
 		GetSessionStartTime(userID string) (time.Time, bool)
 	}
+
+	achievementService *AchievementService // For triggering achievement checks
 }
 
 func NewStreakService(
@@ -57,6 +59,11 @@ func (s *StreakService) SetBot(bot interface {
 	GetSessionStartTime(userID string) (time.Time, bool)
 }) {
 	s.bot = bot
+}
+
+// SetAchievementService sets the achievement service reference for triggering achievement checks
+func (s *StreakService) SetAchievementService(as *AchievementService) {
+	s.achievementService = as
 }
 
 // HandleVoiceJoin is called when a user joins a tracked voice channel
@@ -380,6 +387,16 @@ func (s *StreakService) evaluateUserStreakForToday(ctx context.Context, user dat
 	// Send notification if we have one
 	if notificationEmbed != nil {
 		s.sendStreakEmbed(guildID, notificationEmbed)
+	}
+
+	// Check for streak-related achievements
+	if s.achievementService != nil && newStreakCount > 0 {
+		go s.achievementService.CheckStreakAchievements(ctx, userID, guildID, newStreakCount)
+
+		// Check for comeback kid achievement (streak reset then rebuilt)
+		if user.CurrentStreakCount == 0 && newStreakCount >= 7 {
+			go s.achievementService.CheckComebackKid(ctx, userID, guildID, user.CurrentStreakCount, newStreakCount)
+		}
 	}
 
 	return nil

@@ -37,6 +37,12 @@ func handleStudyCommand(ctx context.Context, s *discordgo.Session, m *discordgo.
 	// Check if user exists
 	_, err := db.GetUser(ctx, m.Author.ID)
 	if err != nil {
+		if err != sql.ErrNoRows {
+			log.Printf("Error retrieving user %s: %v", m.Author.ID, err)
+			s.ChannelMessageSend(m.ChannelID, "Error retrieving user profile. Please try again.")
+			return
+		}
+
 		// Create the user if they don't exist
 		_, err = db.CreateUser(ctx, database.CreateUserParams{
 			UserID:   m.Author.ID,
@@ -52,7 +58,13 @@ func handleStudyCommand(ctx context.Context, s *discordgo.Session, m *discordgo.
 	// Get user stats
 	stats, err := db.GetUserStats(ctx, m.Author.ID)
 	if err != nil {
-		s.ChannelMessageSend(m.ChannelID, "You haven't studied yet! Join a voice channel to start tracking your study time.")
+		if err == sql.ErrNoRows {
+			s.ChannelMessageSend(m.ChannelID, "You haven't studied yet! Join a voice channel to start tracking your study time.")
+			return
+		}
+
+		log.Printf("Error retrieving stats for user %s: %v", m.Author.ID, err)
+		s.ChannelMessageSend(m.ChannelID, "Error retrieving your study stats. Please try again later.")
 		return
 	}
 

@@ -24,6 +24,9 @@ type Config struct {
 
 	// Fields for Streak Feature
 	StreakNotificationChannelID string
+
+	// Fields for Achievement Feature
+	AchievementChannelID string
 }
 
 // Load reads configuration from .env file or environment variables
@@ -52,6 +55,7 @@ func Load() (*Config, error) {
 		TestGuildID:                 os.Getenv("TEST_GUILD_ID"),
 		AllowedVoiceChannelIDsRaw:   os.Getenv("ALLOWED_VOICE_CHANNEL_IDS"),
 		StreakNotificationChannelID: os.Getenv("STREAK_NOTIFICATION_CHANNEL_ID"),
+		AchievementChannelID:        os.Getenv("ACHIEVEMENT_CHANNEL_ID"),
 	}
 
 	config.AllowedVoiceChannelIDsMap = parseChannelIDs(config.AllowedVoiceChannelIDsRaw)
@@ -67,6 +71,10 @@ func Load() (*Config, error) {
 
 	if config.StreakNotificationChannelID == "" {
 		fmt.Println("Info: STREAK_NOTIFICATION_CHANNEL_ID environment variable is not set. Streak notifications will be disabled.")
+	}
+
+	if config.AchievementChannelID == "" {
+		fmt.Println("Info: ACHIEVEMENT_CHANNEL_ID environment variable is not set. Achievement announcements will be disabled.")
 	}
 
 	if config.AllowedVoiceChannelIDsRaw != "" && len(config.AllowedVoiceChannelIDsMap) == 0 {

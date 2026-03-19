@@ -22,6 +22,7 @@ RETURNING *;
 -- name: GetActiveStudySession :one
 /* ACTIVE_SESSION_QUERY_1_PARAM */ SELECT session_id, user_id, start_time, end_time, duration_ms FROM study_sessions
 WHERE user_id = $1 AND end_time IS NULL
+ORDER BY start_time DESC
 LIMIT 1;
 
 -- name: GetUserStats :one
@@ -233,3 +234,156 @@ SET
     current_streak_count = 0,
     updated_at = NOW()
 WHERE user_id = $1 AND guild_id = $2;
+
+-- =============================================
+-- Achievement System Queries
+-- =============================================
+
+-- name: GetAllAchievements :many
+SELECT 
+    achievement_id,
+    name,
+    description,
+    icon,
+    category,
+    requirement_type,
+    requirement_value,
+    is_secret,
+    sort_order
+FROM achievements
+ORDER BY sort_order ASC;
+
+-- name: GetAchievementByID :one
+SELECT 
+    achievement_id,
+    name,
+    description,
+    icon,
+    category,
+    requirement_type,
+    requirement_value,
+    is_secret,
+    sort_order
+FROM achievements
+WHERE achievement_id = $1;
+
+-- name: GetUserAchievements :many
+SELECT 
+    ua.user_id,
+    ua.guild_id,
+    ua.achievement_id,
+    ua.earned_at,
+    ua.notified,
+    a.name,
+    a.description,
+    a.icon,
+    a.category,
+    a.sort_order
+FROM user_achievements ua
+JOIN achievements a ON ua.achievement_id = a.achievement_id
+WHERE ua.user_id = $1 AND ua.guild_id = $2
+ORDER BY a.sort_order ASC;
+
+-- name: GetUserAchievementCount :one
+SELECT COUNT(*) as count
+FROM user_achievements
+WHERE user_id = $1 AND guild_id = $2;
+
+-- name: HasAchievement :one
+SELECT EXISTS(
+    SELECT 1 FROM user_achievements 
+    WHERE user_id = $1 
+    AND guild_id = $2 
+    AND achievement_id = $3
+);
+
+-- name: AwardAchievement :one
+INSERT INTO user_achievements (user_id, guild_id, achievement_id, earned_at, notified)
+VALUES ($1, $2, $3, NOW(), FALSE)
+ON CONFLICT (user_id, guild_id, achievement_id) DO NOTHING
+RETURNING user_id, guild_id, achievement_id, earned_at, notified;
+
+-- name: MarkAchievementNotified :exec
+UPDATE user_achievements
+SET notified = TRUE
+WHERE user_id = $1 AND guild_id = $2 AND achievement_id = $3;
+
+-- name: GetUnnotifiedAchievements :many
+SELECT 
+    ua.user_id,
+    ua.guild_id,
+    ua.achievement_id,
+    ua.earned_at,
+    a.name,
+    a.description,
+    a.icon,
+    a.category
+FROM user_achievements ua
+JOIN achievements a ON ua.achievement_id = a.achievement_id
+WHERE ua.user_id = $1 AND ua.guild_id = $2 AND ua.notified = FALSE
+ORDER BY ua.earned_at ASC;
+
+-- name: GetAchievementsByCategory :many
+SELECT 
+    achievement_id,
+    name,
+    description,
+    icon,
+    category,
+    requirement_type,
+    requirement_value,
+    is_secret,
+    sort_order
+FROM achievements
+WHERE category = $1
+ORDER BY sort_order ASC;
+
+-- name: SetFeaturedBadge :exec
+UPDATE users
+SET featured_badge = $2
+WHERE user_id = $1;
+
+-- name: GetUserFeaturedBadge :one
+SELECT 
+    u.featured_badge,
+    a.name,
+    a.description,
+    a.icon
+FROM users u
+LEFT JOIN achievements a ON u.featured_badge = a.achievement_id
+WHERE u.user_id = $1;
+
+-- name: GetTotalAchievementCount :one
+SELECT COUNT(*) as count FROM achievements;
+
+-- name: GetUniqueStudyHours :one
+SELECT COUNT(DISTINCT EXTRACT(HOUR FROM start_time AT TIME ZONE 'Asia/Manila'))::integer
+FROM study_sessions
+WHERE user_id = $1;
+
+-- name: HasDawnToDuskDay :one
+SELECT EXISTS(
+  SELECT 1 FROM (
+    SELECT DATE(start_time AT TIME ZONE 'Asia/Manila') as study_date,
+           SUM(EXTRACT(EPOCH FROM COALESCE(end_time, NOW()) - start_time)) / 3600 as hours
+    FROM study_sessions
+    WHERE user_id = $1
+    GROUP BY study_date
+    HAVING SUM(EXTRACT(EPOCH FROM COALESCE(end_time, NOW()) - start_time)) / 3600 >= 12
+  ) as daily_hours
+) as has_dawn_to_dusk;
+
+-- name: GetAchievementsByRequirementType :many
+SELECT 
+    achievement_id,
+    name,
+    description,
+    icon,
+    category,
+    requirement_type,
+    requirement_value,
+    is_secret,
+    sort_order
+FROM achievements
+WHERE requirement_type = $1
+ORDER BY requirement_value ASC;

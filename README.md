@@ -121,9 +121,9 @@ Add the Discord channel IDs of voice channels you want to track to `ALLOWED_VOIC
 ### Technology Stack
 
 - **Language**: Go 1.24.1
-- **Database**: PostgreSQL 17 with SQLC for type-safe queries
+- **Database**: PostgreSQL 17 (compatible with Neon, Render, Railway, etc.) with SQLC for type-safe queries
 - **Discord API**: discordgo library
-- **Deployment**: Docker + Render
+- **Deployment**: Docker (supports multiple platforms: Render, Railway, AWS, GCP, Azure)
 - **Timezone Handling**: Asia/Manila timezone for consistent streak calculations
 - **Architecture**: Clean Architecture with dependency injection
 

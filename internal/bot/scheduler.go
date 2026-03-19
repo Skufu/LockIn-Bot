@@ -16,7 +16,7 @@ type Scheduler struct {
 
 // NewScheduler creates a new scheduler for the bot
 func NewScheduler(bot *Bot) *Scheduler {
-	cronInstance := cron.New(cron.WithSeconds())
+	cronInstance := cron.New(cron.WithSeconds(), cron.WithLocation(time.UTC))
 	return &Scheduler{
 		bot:  bot,
 		cron: cronInstance,

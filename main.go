@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -12,6 +13,14 @@ import (
 	"github.com/Skufu/LockIn-Bot/internal/config"
 	"github.com/Skufu/LockIn-Bot/internal/database"
 	"github.com/Skufu/LockIn-Bot/internal/service"
+)
+
+const maxRetries = 5
+
+var (
+	lastHealthCheckLogMu   sync.Mutex
+	lastHealthCheckLog     time.Time
+	healthCheckLogInterval = 5 * time.Minute
 )
 
 func main() {
@@ -43,10 +52,18 @@ func main() {
 	log.Println("Database migrations completed successfully")
 
 	// Create and start the bot
-	log.Println("Initializing Discord bot...")
-	discordBot, err := bot.New(cfg.DiscordToken, db.Querier, cfg, cfg.AllowedVoiceChannelIDsMap)
+	log.Println("Initializing Discord bot with retry logic...")
+	log.Printf("Discord connection retry enabled: max %d attempts, exponential backoff", maxRetries)
+
+	discordBot, err := bot.ConnectWithRetry(cfg.DiscordToken, db.Querier, cfg, cfg.AllowedVoiceChannelIDsMap, maxRetries)
 	if err != nil {
-		log.Fatalf("Failed to create bot: %v", err)
+		// Check if it's a permanent error vs all retries exhausted
+		permanentError, isBotStartupError := err.(bot.BotStartupError)
+		if isBotStartupError && permanentError.Type == bot.ErrorTypePermanent {
+			log.Fatalf("Failed to initialize Discord bot with permanent error (cannot retry): %v", err)
+		} else {
+			log.Fatalf("Failed to initialize Discord bot after %d attempts (all retries exhausted): %v", maxRetries, err)
+		}
 	}
 
 	// Start connection monitoring (but don't auto-shutdown on token errors)
@@ -65,6 +82,14 @@ func main() {
 	// Start StreakService scheduled tasks (can be after setting it on the bot)
 	streakService.StartScheduledTasks()
 
+	// Initialize AchievementService
+	log.Println("Initializing Achievement Service...")
+	achievementService := service.NewAchievementService(db.Querier, discordBot.Session(), cfg)
+	discordBot.SetAchievementService(achievementService)
+
+	// Connect AchievementService to StreakService for streak-based achievements
+	streakService.SetAchievementService(achievementService)
+
 	// Start a simple HTTP server for health checks in a goroutine
 	go func() {
 		port := os.Getenv("PORT")
@@ -77,7 +102,17 @@ func main() {
 
 		// Add multiple health check endpoints
 		http.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-			log.Printf("Health check request received: %s %s", r.Method, r.URL.Path)
+			lastHealthCheckLogMu.Lock()
+			shouldLog := lastHealthCheckLog.IsZero() || time.Since(lastHealthCheckLog) >= healthCheckLogInterval
+			if shouldLog {
+				lastHealthCheckLog = time.Now()
+			}
+			lastHealthCheckLogMu.Unlock()
+
+			if shouldLog {
+				log.Printf("Health check request received: %s %s", r.Method, r.URL.Path)
+			}
+
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
 			w.Write([]byte(`{"status":"healthy","service":"lockin-bot"}`))

@@ -21,11 +21,12 @@ type Bot struct {
 	db                     *database.Queries
 	activeSessions         map[string]time.Time // Maps user_id to session start time
 	activeSessionMu        sync.Mutex
-	LoggingChannelID       string                 // Added to store the logging channel ID
-	testGuildID            string                 // Added to store the test guild ID for command registration
-	allowedVoiceChannelIDs map[string]struct{}    // For storing allowed voice channel IDs
-	cfg                    *config.Config         // Store the full config
-	streakService          *service.StreakService // Added streak service
+	LoggingChannelID       string                      // Added to store the logging channel ID
+	testGuildID            string                      // Added to store the test guild ID for command registration
+	allowedVoiceChannelIDs map[string]struct{}         // For storing allowed voice channel IDs
+	cfg                    *config.Config              // Store the full config
+	streakService          *service.StreakService      // Added streak service
+	achievementService     *service.AchievementService // Added achievement service
 
 	// Worker pool for handling voice events to prevent goroutine explosion
 	voiceEventChan chan func()
@@ -38,6 +39,11 @@ type Bot struct {
 
 // New creates a new Discord bot instance
 func New(token string, db *database.Queries, appConfig *config.Config, allowedVCs map[string]struct{}) (*Bot, error) {
+	// Validate the bot token format before creating a session
+	if err := validateToken(token); err != nil {
+		return nil, fmt.Errorf("token validation failed: %w", err)
+	}
+
 	// Create a new Discord session
 	dg, err := discordgo.New("Bot " + token)
 	if err != nil {
@@ -107,20 +113,25 @@ func (b *Bot) Close() {
 
 // endAllActiveSessions ends all active study sessions when the bot shuts down
 func (b *Bot) endAllActiveSessions() {
-	b.activeSessionMu.Lock()
-	defer b.activeSessionMu.Unlock()
-
 	ctx := context.Background() // Create a context for database operations
 	now := time.Now()
 
+	b.activeSessionMu.Lock()
 	if len(b.activeSessions) == 0 {
+		b.activeSessionMu.Unlock()
 		log.Println("No active study sessions to end on shutdown.")
 		return
 	}
 
-	log.Printf("Attempting to end %d active study session(s) on shutdown...", len(b.activeSessions))
-
+	activeSessions := make(map[string]time.Time, len(b.activeSessions))
 	for userID, startTime := range b.activeSessions {
+		activeSessions[userID] = startTime
+	}
+	b.activeSessionMu.Unlock()
+
+	log.Printf("Attempting to end %d active study session(s) on shutdown...", len(activeSessions))
+
+	for userID, startTime := range activeSessions {
 		log.Printf("Processing shutdown for user %s (session started at %v)", userID, startTime)
 
 		duration := now.Sub(startTime)
@@ -135,6 +146,9 @@ func (b *Bot) endAllActiveSessions() {
 			activeDBSessions = append(activeDBSessions, activeDBSession)
 		} else if err != sql.ErrNoRows {
 			log.Printf("Error getting active DB session for user %s during shutdown: %v. Session may not be ended correctly.", userID, err)
+			b.activeSessionMu.Lock()
+			delete(b.activeSessions, userID)
+			b.activeSessionMu.Unlock()
 			continue // Skip to the next user
 		}
 
@@ -142,6 +156,9 @@ func (b *Bot) endAllActiveSessions() {
 		// This is a safety measure for orphaned sessions
 		if len(activeDBSessions) == 0 {
 			log.Printf("No active DB session found for user %s, but they are in memory. This indicates a potential data inconsistency.", userID)
+			b.activeSessionMu.Lock()
+			delete(b.activeSessions, userID)
+			b.activeSessionMu.Unlock()
 			continue
 		}
 
@@ -192,7 +209,9 @@ func (b *Bot) endAllActiveSessions() {
 				log.Printf("Error sending shutdown session message to Discord channel %s for user %s: %v", b.LoggingChannelID, userID, sendErr)
 			}
 		}
+		b.activeSessionMu.Lock()
 		delete(b.activeSessions, userID) // Remove from in-memory map after processing
+		b.activeSessionMu.Unlock()
 	}
 	log.Println("Finished processing active sessions on shutdown.")
 }
@@ -225,6 +244,22 @@ func (b *Bot) handleReady(s *discordgo.Session, r *discordgo.Ready) {
 			Name:        "streak",
 			Description: "Check your current study streak!",
 		},
+		{
+			Name:        "profile",
+			Description: "View your study profile and badges.",
+			Options: []*discordgo.ApplicationCommandOption{
+				{
+					Type:        discordgo.ApplicationCommandOptionUser,
+					Name:        "user",
+					Description: "The user whose profile you want to view (optional)",
+					Required:    false,
+				},
+			},
+		},
+		{
+			Name:        "badges",
+			Description: "View all available badges and your progress.",
+		},
 	}
 
 	// Iterate and register commands
@@ -255,6 +290,10 @@ func (b *Bot) handleInteractionCreate(s *discordgo.Session, i *discordgo.Interac
 			b.handleSlashHelpCommand(s, i)
 		case "streak":
 			b.handleSlashStreakCommand(s, i)
+		case "profile":
+			b.handleSlashProfileCommand(s, i)
+		case "badges":
+			b.handleSlashBadgesCommand(s, i)
 		default:
 			log.Printf("Unknown command received: %s", commandName)
 			// Direct error response - no retry needed for user errors
@@ -302,6 +341,18 @@ func (b *Bot) handleSlashStatsCommand(s *discordgo.Session, i *discordgo.Interac
 	// Check if user exists, create if needed
 	_, err := b.db.GetUser(ctx, userID)
 	if err != nil {
+		if err != sql.ErrNoRows {
+			log.Printf("Error retrieving user %s for /stats: %v", userID, err)
+			s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+				Type: discordgo.InteractionResponseChannelMessageWithSource,
+				Data: &discordgo.InteractionResponseData{
+					Content: "Error retrieving your user profile. Please try again later.",
+					Flags:   discordgo.MessageFlagsEphemeral,
+				},
+			})
+			return
+		}
+
 		// Create the user if they don't exist
 		_, createErr := b.db.CreateUser(ctx, database.CreateUserParams{
 			UserID:   userID,
@@ -323,11 +374,22 @@ func (b *Bot) handleSlashStatsCommand(s *discordgo.Session, i *discordgo.Interac
 	// Get user stats
 	stats, err := b.db.GetUserStats(ctx, userID)
 	if err != nil {
+		if err == sql.ErrNoRows {
+			s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+				Type: discordgo.InteractionResponseChannelMessageWithSource,
+				Data: &discordgo.InteractionResponseData{
+					Content: "You haven't studied yet! Join a voice channel to start tracking your study time.",
+					Flags:   discordgo.MessageFlagsEphemeral,
+				},
+			})
+			return
+		}
+
 		log.Printf("Error getting user stats for %s: %v", userID, err)
 		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 			Type: discordgo.InteractionResponseChannelMessageWithSource,
 			Data: &discordgo.InteractionResponseData{
-				Content: "You haven't studied yet! Join a voice channel to start tracking your study time.",
+				Content: "Error retrieving your study stats. Please try again later.",
 				Flags:   discordgo.MessageFlagsEphemeral,
 			},
 		})
@@ -439,6 +501,27 @@ func (b *Bot) handleSlashLeaderboardCommand(s *discordgo.Session, i *discordgo.I
 		Fields:      embedFields,
 		Timestamp:   time.Now().Format(time.RFC3339),
 		Footer:      &discordgo.MessageEmbedFooter{Text: "LockIn Bot Leaderboard"},
+	}
+
+	// After getting leaderboard data, check competition achievements for the user
+	if i.Member != nil && i.Member.User != nil {
+		userID := i.Member.User.ID
+		guildID := i.GuildID
+
+		// Find user's rank in leaderboard
+		userRank := 0
+		for rank, entry := range leaderboardData {
+			if entry.UserID == userID {
+				userRank = rank + 1
+				break
+			}
+		}
+
+		if userRank > 0 {
+			// Check competition achievements
+			go b.achievementService.CheckCompetitionAchievements(ctx, userID, guildID, userRank)
+			go b.achievementService.CheckUndefeated(ctx, userID, guildID, userRank)
+		}
 	}
 
 	err = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
@@ -741,31 +824,48 @@ func (b *Bot) handleUserJoinedStudySession(s *discordgo.Session, v *discordgo.Vo
 }
 
 // handleUserLeftStudySession handles when a user leaves a tracked voice channel
-func (b *Bot) handleUserLeftStudySession(_ *discordgo.Session, _ *discordgo.VoiceStateUpdate, user *discordgo.User) {
+func (b *Bot) handleUserLeftStudySession(_ *discordgo.Session, v *discordgo.VoiceStateUpdate, user *discordgo.User) {
+	userID := ""
+	username := ""
+	if user != nil {
+		userID = user.ID
+		username = user.Username
+	}
+	if userID == "" && v != nil {
+		userID = v.UserID
+	}
+	if userID == "" {
+		log.Println("Unable to end study session: missing user ID")
+		return
+	}
+	if username == "" {
+		username = userID
+	}
+
 	b.activeSessionMu.Lock()
 	defer b.activeSessionMu.Unlock()
 
 	// Check if the user has an active session in memory
-	startTime, ok := b.activeSessions[user.ID]
+	startTime, ok := b.activeSessions[userID]
 	if !ok {
 		// log.Printf("User %s left voice channel %s but had no active session in memory.", user.Username, v.BeforeUpdate.ChannelID)
 		return // No active session for this user in memory
 	}
 
 	duration := time.Since(startTime)
-	log.Printf("User %s (%s) left voice channel. Study session ended. Duration: %s", user.Username, user.ID, formatDuration(duration))
+	log.Printf("User %s (%s) left voice channel. Study session ended. Duration: %s", username, userID, formatDuration(duration))
 
 	// Get the active study session from the database
 	ctx := context.Background()
-	activeDBSession, err := b.db.GetActiveStudySession(ctx, sql.NullString{String: user.ID, Valid: true})
+	activeDBSession, err := b.db.GetActiveStudySession(ctx, sql.NullString{String: userID, Valid: true})
 	if err != nil {
 		if err == sql.ErrNoRows {
-			log.Printf("No active DB session found for user %s when ending session. This is likely a race condition or duplicate event.", user.ID)
+			log.Printf("No active DB session found for user %s when ending session. This is likely a race condition or duplicate event.", userID)
 		} else {
-			log.Printf("Error getting active DB session for user %s: %v", user.ID, err)
+			log.Printf("Error getting active DB session for user %s: %v", userID, err)
 		}
 		// Still attempt to remove from in-memory map
-		delete(b.activeSessions, user.ID)
+		delete(b.activeSessions, userID)
 		return
 	}
 
@@ -777,25 +877,25 @@ func (b *Bot) handleUserLeftStudySession(_ *discordgo.Session, _ *discordgo.Voic
 		// DurationMs is now calculated by the query
 	})
 	if err != nil {
-		log.Printf("Error ending study session %d for user %s in DB: %v", activeDBSession.SessionID, user.ID, err)
+		log.Printf("Error ending study session %d for user %s in DB: %v", activeDBSession.SessionID, userID, err)
 		// Still attempt to remove from in-memory map
-		delete(b.activeSessions, user.ID)
+		delete(b.activeSessions, userID)
 		return
 	}
 
-	log.Printf("Ended DB session %d for user %s. DB Duration: %d ms.", endedSession.SessionID, user.ID, endedSession.DurationMs.Int64)
+	log.Printf("Ended DB session %d for user %s. DB Duration: %d ms.", endedSession.SessionID, userID, endedSession.DurationMs.Int64)
 
 	// Update user stats
 	if endedSession.DurationMs.Valid && endedSession.DurationMs.Int64 > 0 {
 		_, err = b.db.CreateOrUpdateUserStats(ctx, database.CreateOrUpdateUserStatsParams{
-			UserID:       user.ID,
+			UserID:       userID,
 			TotalStudyMs: sql.NullInt64{Int64: endedSession.DurationMs.Int64, Valid: true}, // Pass as sql.NullInt64
 			// Daily, weekly, monthly are also updated by this query based on the same amount
 		})
 		if err != nil {
-			log.Printf("Error updating user stats for user %s after session %d: %v", user.ID, endedSession.SessionID, err)
+			log.Printf("Error updating user stats for user %s after session %d: %v", userID, endedSession.SessionID, err)
 		} else {
-			log.Printf("Successfully updated stats for user %s after session %d.", user.ID, endedSession.SessionID)
+			log.Printf("Successfully updated stats for user %s after session %d.", userID, endedSession.SessionID)
 		}
 	}
 
@@ -803,16 +903,38 @@ func (b *Bot) handleUserLeftStudySession(_ *discordgo.Session, _ *discordgo.Voic
 	if b.LoggingChannelID != "" && endedSession.DurationMs.Valid && endedSession.DurationMs.Int64 > 0 {
 		durationForMessage := time.Duration(endedSession.DurationMs.Int64) * time.Millisecond
 		formattedDuration := formatDuration(durationForMessage)
-		message := fmt.Sprintf("<@%s> has spent %s studying!", user.ID, formattedDuration)
+		message := fmt.Sprintf("<@%s> has spent %s studying!", userID, formattedDuration)
 		_, err = b.session.ChannelMessageSend(b.LoggingChannelID, message)
 		if err != nil {
-			log.Printf("Error sending study time announcement to Discord channel %s for user %s: %v", b.LoggingChannelID, user.ID, err)
+			log.Printf("Error sending study time announcement to Discord channel %s for user %s: %v", b.LoggingChannelID, userID, err)
 		}
 	}
 
+	// Check for achievements after session ends
+	if b.achievementService != nil && endedSession.DurationMs.Valid && endedSession.DurationMs.Int64 > 0 {
+		guildID := v.GuildID // Use actual guild from voice state
+
+		// Get total hours for duration achievements
+		stats, err := b.db.GetUserStats(ctx, userID)
+		if err == nil && stats.TotalStudyMs.Valid {
+			totalHours := float64(stats.TotalStudyMs.Int64) / 1000 / 60 / 60
+			sessionHours := float64(endedSession.DurationMs.Int64) / 1000 / 60 / 60
+
+			// Check duration achievements
+			go b.achievementService.CheckDurationAchievements(ctx, userID, guildID, totalHours, sessionHours)
+
+			// Check time-based achievements (Early Bird, Night Owl, etc.)
+			go b.achievementService.CheckTimeBasedAchievements(ctx, userID, guildID, startTime)
+		}
+
+		// Check global_citizen (12 unique hours) and dawn_to_dusk (12 hours in one day)
+		go b.achievementService.CheckGlobalCitizen(ctx, userID, guildID)
+		go b.achievementService.CheckDawnToDusk(ctx, userID, guildID)
+	}
+
 	// Remove user from active sessions map
-	delete(b.activeSessions, user.ID)
-	log.Printf("User %s removed from active session map.", user.ID)
+	delete(b.activeSessions, userID)
+	log.Printf("User %s removed from active session map.", userID)
 }
 
 func (b *Bot) SetStreakService(ss *service.StreakService) {
@@ -888,6 +1010,251 @@ func (b *Bot) handleSlashStreakCommand(s *discordgo.Session, i *discordgo.Intera
 	}
 }
 
+func (b *Bot) SetAchievementService(as *service.AchievementService) {
+	b.achievementService = as
+}
+
+// handleSlashProfileCommand handles the /profile slash command
+func (b *Bot) handleSlashProfileCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	if b.achievementService == nil {
+		log.Println("Error: AchievementService not available for /profile command")
+		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseChannelMessageWithSource,
+			Data: &discordgo.InteractionResponseData{
+				Content: "Achievement service is currently unavailable.",
+				Flags:   discordgo.MessageFlagsEphemeral,
+			},
+		})
+		return
+	}
+
+	ctx := context.Background()
+
+	// Check if a user was specified in options
+	targetUserID := ""
+	targetUsername := ""
+	options := i.ApplicationCommandData().Options
+	for _, opt := range options {
+		if opt.Name == "user" && opt.Type == discordgo.ApplicationCommandOptionUser {
+			targetUserID = opt.UserValue(s).ID
+			targetUsername = opt.UserValue(s).Username
+		}
+	}
+
+	// If no user specified, use the command caller
+	if targetUserID == "" {
+		if i.Member != nil && i.Member.User != nil {
+			targetUserID = i.Member.User.ID
+			targetUsername = i.Member.User.Username
+		} else if i.User != nil {
+			targetUserID = i.User.ID
+			targetUsername = i.User.Username
+		}
+	}
+
+	if targetUserID == "" {
+		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseChannelMessageWithSource,
+			Data: &discordgo.InteractionResponseData{
+				Content: "Error: Could not identify user.",
+				Flags:   discordgo.MessageFlagsEphemeral,
+			},
+		})
+		return
+	}
+
+	guildID := i.GuildID
+
+	// Get profile data
+	profile, err := b.achievementService.GetUserProfile(ctx, targetUserID, guildID)
+	if err != nil {
+		log.Printf("Error getting profile for user %s: %v", targetUserID, err)
+		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseChannelMessageWithSource,
+			Data: &discordgo.InteractionResponseData{
+				Content: "Could not retrieve profile information.",
+				Flags:   discordgo.MessageFlagsEphemeral,
+			},
+		})
+		return
+	}
+
+	// Get stats for the profile
+	stats, _ := b.db.GetUserStats(ctx, targetUserID)
+
+	// Get streak info
+	var currentStreak int32
+	if b.streakService != nil {
+		streakInfo, err := b.db.GetUserStreak(ctx, database.GetUserStreakParams{
+			UserID:  targetUserID,
+			GuildID: guildID,
+		})
+		if err == nil {
+			currentStreak = streakInfo.CurrentStreakCount
+		}
+	}
+
+	// Format total study time
+	totalStudyTime := "0h 0m"
+	if stats.TotalStudyMs.Valid {
+		totalMs := stats.TotalStudyMs.Int64
+		total := time.Duration(totalMs) * time.Millisecond
+		totalStudyTime = formatDuration(total)
+	}
+
+	// Featured badge display
+	featuredBadgeDisplay := "None set"
+	if profile.FeaturedBadge.FeaturedBadge.Valid && profile.FeaturedBadge.Icon.Valid {
+		featuredBadgeDisplay = fmt.Sprintf("%s %s", profile.FeaturedBadge.Icon.String, profile.FeaturedBadge.Name.String)
+	}
+
+	// Build embed
+	embed := &discordgo.MessageEmbed{
+		Title: fmt.Sprintf("📊 Study Profile: %s", targetUsername),
+		Color: 0x5865F2, // Discord blurple
+		Fields: []*discordgo.MessageEmbedField{
+			{Name: "🔥 Current Streak", Value: fmt.Sprintf("%d days", currentStreak), Inline: true},
+			{Name: "⏱️ Total Study Time", Value: totalStudyTime, Inline: true},
+			{Name: "🏆 Badges Earned", Value: fmt.Sprintf("%d/%d", profile.BadgeCount, profile.TotalBadges), Inline: true},
+			{Name: "✨ Featured Badge", Value: featuredBadgeDisplay, Inline: true},
+			{Name: "📜 Badge Collection", Value: profile.BadgeIcons, Inline: false},
+		},
+		Timestamp: time.Now().Format(time.RFC3339),
+		Footer:    &discordgo.MessageEmbedFooter{Text: "Use /badges to see all available badges"},
+	}
+
+	// Get user avatar if possible
+	discordUser, err := s.User(targetUserID)
+	if err == nil && discordUser != nil {
+		embed.Thumbnail = &discordgo.MessageEmbedThumbnail{
+			URL: discordUser.AvatarURL("128"),
+		}
+	}
+
+	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseChannelMessageWithSource,
+		Data: &discordgo.InteractionResponseData{
+			Embeds: []*discordgo.MessageEmbed{embed},
+		},
+	})
+}
+
+// handleSlashBadgesCommand handles the /badges slash command
+func (b *Bot) handleSlashBadgesCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	if b.achievementService == nil {
+		log.Println("Error: AchievementService not available for /badges command")
+		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseChannelMessageWithSource,
+			Data: &discordgo.InteractionResponseData{
+				Content: "Achievement service is currently unavailable.",
+				Flags:   discordgo.MessageFlagsEphemeral,
+			},
+		})
+		return
+	}
+
+	ctx := context.Background()
+
+	userID := ""
+	if i.Member != nil && i.Member.User != nil {
+		userID = i.Member.User.ID
+	} else if i.User != nil {
+		userID = i.User.ID
+	}
+
+	if userID == "" {
+		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseChannelMessageWithSource,
+			Data: &discordgo.InteractionResponseData{
+				Content: "Error: Could not identify user.",
+				Flags:   discordgo.MessageFlagsEphemeral,
+			},
+		})
+		return
+	}
+
+	guildID := i.GuildID
+
+	// Get all achievements with progress
+	achievements, err := b.achievementService.GetAllAchievementsWithProgress(ctx, userID, guildID)
+	if err != nil {
+		log.Printf("Error getting achievements for user %s: %v", userID, err)
+		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseChannelMessageWithSource,
+			Data: &discordgo.InteractionResponseData{
+				Content: "Could not retrieve badge information.",
+				Flags:   discordgo.MessageFlagsEphemeral,
+			},
+		})
+		return
+	}
+
+	// Group achievements by category
+	categories := map[string][]service.AchievementWithProgress{
+		"streak":      {},
+		"time":        {},
+		"duration":    {},
+		"competition": {},
+		"special":     {},
+	}
+
+	earnedCount := 0
+	for _, ach := range achievements {
+		categories[ach.Category] = append(categories[ach.Category], ach)
+		if ach.Earned {
+			earnedCount++
+		}
+	}
+
+	// Build category displays
+	categoryNames := map[string]string{
+		"streak":      "🔥 Streak Badges",
+		"time":        "⏰ Time-Based Badges",
+		"duration":    "⏱️ Duration Badges",
+		"competition": "🏆 Competition Badges",
+		"special":     "✨ Special Badges",
+	}
+
+	var fields []*discordgo.MessageEmbedField
+	for _, cat := range []string{"streak", "time", "duration", "competition", "special"} {
+		achs := categories[cat]
+		if len(achs) == 0 {
+			continue
+		}
+
+		var display string
+		for _, ach := range achs {
+			status := "⬜"
+			if ach.Earned {
+				status = ach.Icon
+			}
+			display += fmt.Sprintf("%s %s\n", status, ach.Name)
+		}
+
+		fields = append(fields, &discordgo.MessageEmbedField{
+			Name:   categoryNames[cat],
+			Value:  display,
+			Inline: true,
+		})
+	}
+
+	embed := &discordgo.MessageEmbed{
+		Title:       "🏅 Badges Collection",
+		Description: fmt.Sprintf("You have earned **%d/%d** badges!\n\n✅ = Earned | ⬜ = Locked", earnedCount, len(achievements)),
+		Color:       0xFFD700, // Gold
+		Fields:      fields,
+		Timestamp:   time.Now().Format(time.RFC3339),
+		Footer:      &discordgo.MessageEmbedFooter{Text: "Keep studying to unlock more badges!"},
+	}
+
+	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseChannelMessageWithSource,
+		Data: &discordgo.InteractionResponseData{
+			Embeds: []*discordgo.MessageEmbed{embed},
+		},
+	})
+}
+
 // voiceEventWorker processes voice events in a single goroutine to prevent memory leaks
 func (b *Bot) voiceEventWorker() {
 	for {
@@ -947,6 +1314,15 @@ func (b *Bot) checkConnectionHealth() {
 
 // isTokenError checks if the error indicates a token problem
 func (b *Bot) isTokenError(err error) bool {
+	if restErr, ok := err.(*discordgo.RESTError); ok {
+		if restErr.Response != nil {
+			status := restErr.Response.StatusCode
+			if status == 401 || status == 403 {
+				return true
+			}
+		}
+	}
+
 	errorStr := err.Error()
 	tokenErrorIndicators := []string{
 		"401",

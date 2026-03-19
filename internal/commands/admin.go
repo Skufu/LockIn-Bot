@@ -59,10 +59,12 @@ func (a *AdminCommands) HandleCleanupSessions(s *discordgo.Session, i *discordgo
 
 // hasAdminPermissions checks if the member has admin permissions
 func hasAdminPermissions(member *discordgo.Member) bool {
-	// Simplified permission check - returns true for now
-	// TODO: Implement proper role-based permission checking
-	// You can check for specific role IDs or permission bits here
-	return true // For now, allow all users - implement proper checks as needed
+	if member == nil {
+		return false
+	}
+
+	// Require Administrator permission for destructive admin commands
+	return member.Permissions&discordgo.PermissionAdministrator != 0
 }
 
 // respondWithError sends an error response
