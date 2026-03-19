@@ -25,10 +25,11 @@ func connectWithRetry(token string, db *database.Queries, cfg *config.Config, al
 	}
 
 	var lastErr error
-	// Use a longer base delay to avoid triggering Cloudflare rate limits (error 1015)
+	// Use a longer base delay and higher max delay to avoid triggering Cloudflare rate limits (error 1015)
 	// on shared hosting IPs like Render's free tier
-	baseDelay := 5 * time.Second
-	maxDelay := 2 * time.Minute
+	// INCREASED: base 15s, max 5min to give Cloudflare blocks more time to expire
+	baseDelay := 15 * time.Second
+	maxDelay := 5 * time.Minute
 
 	for attempt := 1; attempt <= maxRetries; attempt++ {
 		log.Printf("Attempt %d/%d to connect to Discord", attempt, maxRetries)

@@ -69,8 +69,9 @@ func main() {
 	// Add an initial delay before connecting to Discord to let any Cloudflare rate limits expire
 	// This is critical when Render restarts the process — without this delay, rapid restarts
 	// trigger Cloudflare error 1015 (CDN-level rate limiting on shared IPs)
-	log.Println("Waiting 10 seconds before connecting to Discord (avoiding Cloudflare rate limits)...")
-	time.Sleep(10 * time.Second)
+	// INCREASED: 30 seconds to give Cloudflare blocks more time to expire
+	log.Println("Waiting 30 seconds before connecting to Discord (avoiding Cloudflare rate limits)...")
+	time.Sleep(30 * time.Second)
 
 	// Create and start the bot with retry logic
 	log.Println("Initializing Discord bot with retry logic...")
@@ -144,7 +145,7 @@ func startHealthCheckServer() {
 		log.Println("PORT environment variable not set. Skipping health check server (running as Background Worker).")
 		return
 	}
-	
+
 	log.Printf("Starting health check server on port %s (from PORT env var)", port)
 
 	mux := http.NewServeMux()
