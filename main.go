@@ -15,12 +15,14 @@ import (
 	"github.com/Skufu/LockIn-Bot/internal/service"
 )
 
-const maxRetries = 5
+const maxRetries = 10
 
 var (
 	lastHealthCheckLogMu   sync.Mutex
 	lastHealthCheckLog     time.Time
 	healthCheckLogInterval = 5 * time.Minute
+	botReady               bool
+	botReadyMu             sync.Mutex
 )
 
 func main() {
@@ -51,9 +53,10 @@ func main() {
 	}
 	log.Println("Database migrations completed successfully")
 
-	// Create and start the bot
-	log.Println("Initializing Discord bot with retry logic...")
-	log.Printf("Discord connection retry enabled: max %d attempts, exponential backoff", maxRetries)
+	// Start the HTTP health check server FIRST
+	// This prevents Render from killing the process for not binding a port,
+	// which would cause a restart loop that triggers Cloudflare rate limits.
+	startHealthCheckServer()
 
 	// Log token diagnostics (masked) to help debug configuration issues on deploy
 	tokenLen := len(cfg.DiscordToken)
@@ -62,6 +65,16 @@ func main() {
 		tokenPreview = cfg.DiscordToken[:8]
 	}
 	log.Printf("Token diagnostics: length=%d, prefix=%s...", tokenLen, tokenPreview)
+
+	// Add an initial delay before connecting to Discord to let any Cloudflare rate limits expire
+	// This is critical when Render restarts the process — without this delay, rapid restarts
+	// trigger Cloudflare error 1015 (CDN-level rate limiting on shared IPs)
+	log.Println("Waiting 10 seconds before connecting to Discord (avoiding Cloudflare rate limits)...")
+	time.Sleep(10 * time.Second)
+
+	// Create and start the bot with retry logic
+	log.Println("Initializing Discord bot with retry logic...")
+	log.Printf("Discord connection retry enabled: max %d attempts, exponential backoff", maxRetries)
 
 	discordBot, err := bot.ConnectWithRetry(cfg.DiscordToken, db.Querier, cfg, cfg.AllowedVoiceChannelIDsMap, maxRetries)
 	if err != nil {
@@ -73,6 +86,11 @@ func main() {
 			log.Fatalf("Failed to initialize Discord bot after %d attempts (all retries exhausted): %v", maxRetries, err)
 		}
 	}
+
+	// Mark bot as ready
+	botReadyMu.Lock()
+	botReady = true
+	botReadyMu.Unlock()
 
 	// Start connection monitoring (but don't auto-shutdown on token errors)
 	discordBot.MonitorConnection()
@@ -98,50 +116,6 @@ func main() {
 	// Connect AchievementService to StreakService for streak-based achievements
 	streakService.SetAchievementService(achievementService)
 
-	// Start a simple HTTP server for health checks in a goroutine
-	go func() {
-		port := os.Getenv("PORT")
-		if port == "" {
-			port = "8000" // Default port if not set by Render (Render usually sets PORT)
-			log.Printf("Defaulting to port %s for health check server (PORT env var not set)", port)
-		} else {
-			log.Printf("Attempting to start health check server on port %s (from PORT env var)", port)
-		}
-
-		// Add multiple health check endpoints
-		http.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-			lastHealthCheckLogMu.Lock()
-			shouldLog := lastHealthCheckLog.IsZero() || time.Since(lastHealthCheckLog) >= healthCheckLogInterval
-			if shouldLog {
-				lastHealthCheckLog = time.Now()
-			}
-			lastHealthCheckLogMu.Unlock()
-
-			if shouldLog {
-				log.Printf("Health check request received: %s %s", r.Method, r.URL.Path)
-			}
-
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusOK)
-			w.Write([]byte(`{"status":"healthy","service":"lockin-bot"}`))
-		})
-
-		http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-			log.Printf("Root request received: %s %s", r.Method, r.URL.Path)
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusOK)
-			w.Write([]byte(`{"status":"healthy","service":"lockin-bot","message":"LockIn Bot is running"}`))
-		})
-
-		log.Printf("Health check server attempting to listen on :%s", port)
-		log.Printf("Health check endpoints available: /healthz, /health, /")
-
-		if err := http.ListenAndServe(":"+port, nil); err != nil {
-			log.Printf("Warning: Health check server failed to start: %v", err)
-			log.Println("Bot will continue running without health check server")
-		}
-	}()
-
 	// Create and start the scheduler for existing bot tasks (e.g., study session resets)
 	scheduler := bot.NewScheduler(discordBot)
 	scheduler.Start()
@@ -159,4 +133,61 @@ func main() {
 	streakService.StopScheduledTasks()
 	discordBot.Close()
 	log.Println("Shutdown complete. Goodbye!")
+}
+
+// startHealthCheckServer starts the HTTP health check server immediately
+// so Render sees a bound port and doesn't kill the process during Discord connection retries.
+func startHealthCheckServer() {
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8000"
+		log.Printf("Defaulting to port %s for health check server (PORT env var not set)", port)
+	} else {
+		log.Printf("Starting health check server on port %s (from PORT env var)", port)
+	}
+
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		lastHealthCheckLogMu.Lock()
+		shouldLog := lastHealthCheckLog.IsZero() || time.Since(lastHealthCheckLog) >= healthCheckLogInterval
+		if shouldLog {
+			lastHealthCheckLog = time.Now()
+		}
+		lastHealthCheckLogMu.Unlock()
+
+		if shouldLog {
+			log.Printf("Health check request received: %s %s", r.Method, r.URL.Path)
+		}
+
+		botReadyMu.Lock()
+		ready := botReady
+		botReadyMu.Unlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		if ready {
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{"status":"healthy","service":"lockin-bot","discord":"connected"}`))
+		} else {
+			w.WriteHeader(http.StatusOK) // Still return 200 so Render doesn't restart us
+			w.Write([]byte(`{"status":"starting","service":"lockin-bot","discord":"connecting"}`))
+		}
+	})
+
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"status":"healthy","service":"lockin-bot","message":"LockIn Bot is running"}`))
+	})
+
+	go func() {
+		log.Printf("Health check server listening on :%s", port)
+		if err := http.ListenAndServe(":"+port, mux); err != nil {
+			log.Printf("Warning: Health check server failed to start: %v", err)
+		}
+	}()
+
+	// Give the HTTP server a moment to bind the port
+	time.Sleep(500 * time.Millisecond)
+	log.Println("Health check server started successfully")
 }

@@ -1,12 +1,9 @@
 package bot
 
 import (
-	"bytes"
 	"fmt"
-	"io"
 	"log"
 	"math/rand"
-	"net/http"
 	"sync"
 	"time"
 
@@ -14,41 +11,6 @@ import (
 	"github.com/Skufu/LockIn-Bot/internal/database"
 	"github.com/bwmarrin/discordgo"
 )
-
-// debugTransport wraps an http.RoundTripper to log response details for debugging
-type debugTransport struct {
-	base http.RoundTripper
-}
-
-func (d *debugTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	log.Printf("[DEBUG HTTP] %s %s", req.Method, req.URL.String())
-
-	resp, err := d.base.RoundTrip(req)
-	if err != nil {
-		log.Printf("[DEBUG HTTP] Request error: %v", err)
-		return resp, err
-	}
-
-	// Read the body to log it, then put it back
-	bodyBytes, readErr := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	if readErr != nil {
-		log.Printf("[DEBUG HTTP] Body read error: %v", readErr)
-		resp.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-		return resp, err
-	}
-
-	// Log status and body preview
-	preview := string(bodyBytes)
-	if len(preview) > 500 {
-		preview = preview[:500] + "..."
-	}
-	log.Printf("[DEBUG HTTP] Response: %d %s | Body: %s", resp.StatusCode, resp.Status, preview)
-
-	// Restore the body for discordgo to read
-	resp.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-	return resp, nil
-}
 
 // Initialize randomness once during package initialization
 func init() {
@@ -63,8 +25,10 @@ func connectWithRetry(token string, db *database.Queries, cfg *config.Config, al
 	}
 
 	var lastErr error
-	baseDelay := time.Second
-	maxDelay := 60 * time.Second
+	// Use a longer base delay to avoid triggering Cloudflare rate limits (error 1015)
+	// on shared hosting IPs like Render's free tier
+	baseDelay := 5 * time.Second
+	maxDelay := 2 * time.Minute
 
 	for attempt := 1; attempt <= maxRetries; attempt++ {
 		log.Printf("Attempt %d/%d to connect to Discord", attempt, maxRetries)
@@ -93,18 +57,6 @@ func connectWithRetry(token string, db *database.Queries, cfg *config.Config, al
 
 			time.Sleep(nextDelay)
 			continue
-		}
-
-		// Inject debug HTTP transport to log raw Discord responses
-		if dg.Client == nil {
-			dg.Client = http.DefaultClient
-		}
-		transport := dg.Client.Transport
-		if transport == nil {
-			transport = http.DefaultTransport
-		}
-		dg.Client = &http.Client{
-			Transport: &debugTransport{base: transport},
 		}
 
 		// Set intents BEFORE opening the connection (critical: discordgo needs these for the gateway handshake)
