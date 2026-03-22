@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
-	"strings"
 	"sync"
 	"time"
 
@@ -1273,104 +1272,4 @@ func (b *Bot) GetSessionStartTime(userID string) (time.Time, bool) {
 	defer b.activeSessionMu.Unlock()
 	startTime, exists := b.activeSessions[userID]
 	return startTime, exists
-}
-
-// MonitorConnection starts a goroutine to monitor Discord connection health
-func (b *Bot) MonitorConnection() {
-	go b.connectionMonitorLoop()
-}
-
-// connectionMonitorLoop periodically checks Discord connection health
-func (b *Bot) connectionMonitorLoop() {
-	ticker := time.NewTicker(30 * time.Second) // Check every 30 seconds
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ticker.C:
-			b.checkConnectionHealth()
-		case <-b.shutdownChan:
-			return
-		}
-	}
-}
-
-// checkConnectionHealth verifies Discord connection and handles token issues
-func (b *Bot) checkConnectionHealth() {
-	// Try a simple API call to test if token is still valid
-	_, err := b.session.User("@me")
-	if err != nil {
-		log.Printf("🚨 CRITICAL: Discord connection health check failed: %v", err)
-
-		// Check if this is an authentication error (token expired/invalid)
-		if b.isTokenError(err) {
-			log.Printf("🔴 TOKEN EXPIRED/INVALID: %v", err)
-			b.handleTokenExpiration()
-		} else {
-			log.Printf("⚠️  Network or temporary Discord API error: %v", err)
-		}
-	}
-}
-
-// isTokenError checks if the error indicates a token problem
-func (b *Bot) isTokenError(err error) bool {
-	if restErr, ok := err.(*discordgo.RESTError); ok {
-		if restErr.Response != nil {
-			status := restErr.Response.StatusCode
-			if status == 401 || status == 403 {
-				return true
-			}
-		}
-	}
-
-	errorStr := err.Error()
-	tokenErrorIndicators := []string{
-		"401",
-		"Unauthorized",
-		"invalid token",
-		"token",
-		"authentication",
-		"forbidden",
-	}
-
-	for _, indicator := range tokenErrorIndicators {
-		if strings.Contains(strings.ToLower(errorStr), strings.ToLower(indicator)) {
-			return true
-		}
-	}
-	return false
-}
-
-// handleTokenExpiration handles the critical case when Discord token expires
-func (b *Bot) handleTokenExpiration() {
-	log.Printf("🔴🔴🔴 CRITICAL ALERT: Discord token has expired or been revoked!")
-	log.Printf("📋 ACTION REQUIRED:")
-	log.Printf("1. Go to Discord Developer Portal: https://discord.com/developers/applications")
-	log.Printf("2. Select your bot application")
-	log.Printf("3. Go to 'Bot' section")
-	log.Printf("4. Click 'Reset Token' to generate a new token")
-	log.Printf("5. Update DISCORD_TOKEN environment variable")
-	log.Printf("6. Restart the bot")
-
-	// Try to send alert to logging channel if possible
-	if b.LoggingChannelID != "" {
-		alertMessage := "🚨 **CRITICAL ALERT** 🚨\n\n" +
-			"**Discord Bot Token Has Expired!**\n\n" +
-			"The bot will stop working until the token is renewed.\n\n" +
-			"**Immediate Action Required:**\n" +
-			"1. Go to Discord Developer Portal\n" +
-			"2. Reset the bot token\n" +
-			"3. Update environment variables\n" +
-			"4. Restart the bot service\n\n" +
-			"**Bot Status:** 🔴 OFFLINE"
-
-		_, err := b.session.ChannelMessageSend(b.LoggingChannelID, alertMessage)
-		if err != nil {
-			log.Printf("Failed to send token expiration alert to Discord: %v", err)
-		}
-	}
-
-	// Log the issue but don't automatically shutdown - let the main process decide
-	log.Printf("⚠️  Token expired but continuing to run for manual intervention")
-	log.Printf("⚠️  Bot functionality will be limited until token is renewed")
 }

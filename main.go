@@ -93,9 +93,6 @@ func main() {
 	botReady = true
 	botReadyMu.Unlock()
 
-	// Start connection monitoring (but don't auto-shutdown on token errors)
-	discordBot.MonitorConnection()
-
 	// Initialize StreakService
 	log.Println("Initializing Streak Service...")
 	streakService := service.NewStreakService(db.Querier, discordBot.Session(), cfg)
