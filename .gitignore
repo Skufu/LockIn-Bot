@@ -1,31 +1,24 @@
-# Environment variables - DO NOT COMMIT
-.env
-
-
-
-
-# Compiled executable
-LockIn-Bot.exe
+# === Go ===
 *.exe
-LockIn-Bot
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+vendor/
+go.work
+go.work.sum
+bin/
 
-# OS-specific files
+# === General ===
+.env
+.env.local
+.env.*.local
+.vscode/
+.idea/
+*.swp
+*.swo
 .DS_Store
-
-
-.cursor/
-user_stats.json
-user_streaks.json
-
-fix_production_user_streaks.sql
-
-*_development_neondb_*.json
-*_production_*.json
-
-*_neondb_*.json
-
-
-docs/
-
-
-.opencode/
+Thumbs.db
+*.log
